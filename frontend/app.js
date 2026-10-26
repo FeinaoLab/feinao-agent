@@ -1,5 +1,6 @@
 var TOKEN = localStorage.getItem('feinao_token') || '';
 var ROLE = localStorage.getItem('feinao_role') || 'viewer';
+var CONV = parseInt(localStorage.getItem('feinao_conv') || '0', 10) || 0;
 var CUR = 'chat';
 var $ = function (s) { return document.querySelector(s); };
 
@@ -28,18 +29,63 @@ function bubble(cls, txt) {
 }
 
 function chatView() {
-  $('#view').innerHTML = '<div class="chat"><div id="msgs" class="msgs">' +
-    '<div class="msg ai">你好，我是飞脑。可自由对话，也可切到「三试点」使用知识问答 / 智能查数 / 客服话术。</div></div>' +
+  $('#view').innerHTML = '<div class="chat">' +
+    '<div class="cbar"><select id="csel"></select><button id="cnew">新会话</button>' +
+    '<span id="cstat" class="cstat">长期记忆：开</span></div>' +
+    '<div id="msgs" class="msgs">' +
+    '<div class="msg ai">你好，我是飞脑。本会话有长期记忆：聊过的事我会一直记得，摘要装不下的细节还能回溯原文。</div></div>' +
     '<div class="inp"><textarea id="itx" placeholder="输入问题，Enter 发送"></textarea><button id="isend">发送</button></div></div>';
   $('#isend').onclick = send;
   $('#itx').onkeydown = function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } };
+  $('#cnew').onclick = function () { CONV = 0; localStorage.removeItem('feinao_conv'); $('#msgs').innerHTML = ''; renderConvs(); };
+  $('#csel').onchange = function () { CONV = parseInt(this.value, 10) || 0; if (CONV) localStorage.setItem('feinao_conv', CONV); renderConvs(); };
+  renderConvs();
+
+  function renderConvs() {
+    api('lcm_convs').then(function (d) {
+      var rows = d.rows || [];
+      if (!CONV && rows.length) { CONV = rows[0].id; localStorage.setItem('feinao_conv', CONV); }
+      var sel = $('#csel'); if (!sel) return;
+      sel.innerHTML = '<option value="0">＋ 新会话</option>' + rows.map(function (r) {
+        return '<option value="' + r.id + '"' + (r.id === CONV ? ' selected' : '') + '>#' + r.id +
+          ' ' + (r.title || '') .slice(0, 16) + '（' + r.turns + ' 轮）</option>';
+      }).join('');
+      if (CONV) { sel.value = String(CONV); loadHistory(); }
+    }).catch(function () {});
+  }
+
+  function loadHistory() {
+    api('lcm?conv_id=' + CONV).then(function (d) {
+      var box = $('#msgs'); if (!box) return;
+      box.innerHTML = '<div class="msg ai">历史会话 #' + d.conv_id + '：' + d.turns +
+        ' 轮 / 原始 ' + d.raw_tokens + ' token，本轮上下文预算 ' + d.budget + ' token。</div>';
+      updateStat(d);
+    }).catch(function () {});
+  }
+
+  function updateStat(st) {
+    var s = $('#cstat'); if (!s || !st) return;
+    s.textContent = '会话 #' + st.conv_id + ' ｜ ' + st.turns + ' 轮 ｜ 上下文 ' + st.context_tokens +
+      '/' + st.budget + ' token ｜ 摘要 ' + st.nodes + ' 段';
+  }
+
   function send() {
     var t = $('#itx').value.trim(); if (!t) return;
     $('#itx').value = '';
     bubble('me', t);
     var wait = bubble('ai', '思考中…');
-    api('chat', { method: 'POST', body: { messages: [{ role: 'user', content: t }] } })
-      .then(function (d) { wait.textContent = d.answer + '\n—— ' + d.provider; })
+    var body = { text: t };
+    if (CONV) body.conv_id = CONV;
+    api('chat', { method: 'POST', body: body })
+      .then(function (d) {
+        CONV = d.conv_id; localStorage.setItem('feinao_conv', CONV);
+        wait.textContent = d.answer;
+        bubble('meta', '—— ' + d.provider + ' ｜ 上下文 ' + d.context_tokens + ' token' +
+          (d.summaries ? ' ｜ 摘要 ' + d.summaries + ' 段' : '') +
+          (d.detail_back && d.detail_back.length ? ' ｜ 回溯原文 #' + d.detail_back.join('、') : ''));
+        updateStat(d.stats);
+        renderConvs();
+      })
       .catch(function (m) { wait.textContent = '出错了：' + m; });
   }
 }
