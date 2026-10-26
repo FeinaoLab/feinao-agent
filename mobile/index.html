@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#4f46e5">
+<title>飞脑</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="lg" class="lg-wrap">
+  <form id="lgf" class="lg">
+    <img src="icon.svg" width="76" height="76">
+    <h1>飞脑 AI 助手</h1>
+    <p>一个入口 · 智达全系</p>
+    <input id="lg-u" placeholder="账号" value="admin" autocomplete="username">
+    <input id="lg-p" type="password" placeholder="密码" autocomplete="current-password">
+    <button>登 录</button>
+    <em id="lg-err"></em>
+  </form>
+</div>
+<div id="main" hidden>
+  <header><img src="icon.svg" width="24" height="24"><b>飞脑</b><span id="pg">对话</span></header>
+  <div class="chips">
+    <a data-p="ask">📚 知识问答</a><a data-p="nl2api">📊 智能查数</a><a data-p="script">💬 客服话术</a><a data-p="chat" class="on">自由对话</a>
+  </div>
+  <div id="msgs" class="msgs"></div>
+  <div class="inp"><textarea id="itx" placeholder="输入…"></textarea><button id="isend">发</button></div>
+</div>
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
