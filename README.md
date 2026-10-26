@@ -56,4 +56,4 @@ python -m pytest tests/ -q     # 11 项：API 全链路 + LCM + 供应商真实�
 ## 生产部署
 systemd（8060）+ nginx /nao/（桌面）与 /nao/m/（手机），已上线运行。
 
-配真实 Key：把 Key 写进 `/opt/feinao-agent/.env`（参考 `.env.example`），`systemctl restart fei-feinao-agent` 即生效，无需改代码；未配置自动 mock 兜底，全链路可用。
+真实 Key 已上线（2026-10-27，阿里云百炼 qwen-flash）：Key 在 `/opt/feinao-agent/.env`（参考 `.env.example`），改 Key/换模型后 `systemctl restart fei-feinao-agent` 即生效，无需改代码；全缺时自动 mock 兜底。
