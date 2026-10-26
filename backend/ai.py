@@ -82,8 +82,38 @@ def _call_openai(p, messages, timeout=30):
 
 
 def _call_mock(messages, **kw):
-    sys_txt = " ".join(m.get("content", "") for m in messages if m.get("role") == "system")
-    user_txt = " ".join(m.get("content", "") for m in messages if m.get("role") == "user")
+    sys_txt = "\n".join(m.get("content", "") for m in messages if m.get("role") == "system")
+    user_txt = "\n".join(m.get("content", "") for m in messages if m.get("role") == "user")
+    if "[PILOT:lcm]" in sys_txt:
+        # 模拟"只能看见给定上下文"的模型：上下文里有就答，没有就说不知道。
+        # 用它来做 LCM / 截断窗口的对照实验，结论不掺运气。
+        turns = [m.get("content", "") for m in messages if m.get("role") == "user"]
+        question = turns[-1] if turns else ""      # 只用最后一句提问，别把历史当问题
+        kws = [k for k in _keywords(question, 8) if len(k) >= 2]
+        asks_num = any(t in question for t in ("多少", "几", "多大", "比例", "金额", "时间", "日期"))
+        scored = []
+        for line in sys_txt.splitlines():
+            if "[PILOT:" in line:
+                continue
+            hit = sum(1 for k in kws if k in line)
+            if not hit:
+                continue
+            score = hit + (1 if (asks_num and re.search(r"[0-9]", line)) else 0)
+            scored.append((score, line.strip()))
+        if scored:
+            scored.sort(key=lambda x: -x[0])
+            top = [t for sc, t in scored[:2]]
+            return "（依据上下文）" + " ｜ ".join(x[:110] for x in top)
+        return "（上下文中没有相关信息，无法回答）"
+    if "[PILOT:sum]" in sys_txt:
+        # 速记员 mock：抽取每轮开头，保留数字型细节
+        parts = [l.strip() for l in user_txt.split("\n") if l.strip()]
+        parts = [re.sub(r"^-+\s*", "", re.sub(r"^(user|assistant|summary):\s*", "", p)) for p in parts]
+        keep = []
+        for p in parts[:12]:
+            nums = re.findall(r"[0-9]+(?:\.[0-9]+)?", p)
+            keep.append("- " + p[:60] + (("（含：" + "、".join(nums[:2]) + "）") if nums else ""))
+        return "\n".join(keep)[:700]
     if "[PILOT:nl2api]" in sys_txt:
         # 返回结构化意图（JSON）
         kw_hit = [k for k in ("订单", "商品", "客户", "销售", "工单") if k in user_txt]
