@@ -16,6 +16,33 @@ DB_PATH = os.environ.get("FEINAO_DB", os.path.join(BASE, "feinao.db"))
 _lock_lock = True
 
 
+def _load_env_file():
+    """从 .env 文件读供应商 Key（优先级低于真实环境变量，不改动 systemd 单元）。
+
+    查找顺序：FEINAO_ENV_FILE 指定 → backend/.env → 项目根/.env → /opt/feinao-agent/.env
+    文件格式：每行 KEY=VALUE，# 开头为注释。
+    """
+    cands = [os.environ.get("FEINAO_ENV_FILE", ""),
+             os.path.join(BASE, ".env"),
+             os.path.join(os.path.dirname(BASE), ".env"),
+             "/opt/feinao-agent/.env"]
+    for p in cands:
+        if not p or not os.path.isfile(p):
+            continue
+        try:
+            for line in io.open(p, encoding="utf-8"):
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+        except Exception:
+            pass
+
+
+_load_env_file()
+
+
 def db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -154,6 +181,33 @@ def llm_chat(messages, user="system"):
             last_err = str(e)[:200]
             _usage(p["name"], p.get("model", "-"), False, int((time.time() - t0) * 1000), 0, 0)
     raise RuntimeError("all providers failed: %s" % last_err)
+
+
+def providers_health(ping=False):
+    """供应商体检：Key 是否就位；ping=True 时真发一次最小请求验证 Key 有效。"""
+    out = []
+    for p in SPEC["providers"]:
+        item = {"name": p["name"], "type": p["type"], "model": p.get("model", "-")}
+        if p["type"] == "mock":
+            item.update(ok=True, key=False, note="内置兜底，无需 Key")
+            out.append(item)
+            continue
+        has = bool(os.environ.get(p.get("key_env", ""), ""))
+        item.update(ok=has, key=has, key_env=p.get("key_env"))
+        if not has:
+            item["note"] = "未配置 Key（降级到下一家）"
+        elif ping:
+            t0 = time.time()
+            try:
+                reply = _call_openai(p, [{"role": "user", "content": "回复两个字：在线"}], timeout=20)
+                item.update(ok=True, latency_ms=int((time.time() - t0) * 1000), reply=(reply or "")[:30])
+            except Exception as e:
+                item.update(ok=False, error=str(e)[:150])
+        else:
+            item["note"] = "Key 已配置（未实测，加 ?ping=1 实测）"
+        out.append(item)
+    return {"providers": out, "chain": [p["name"] for p in SPEC["providers"]],
+            "pinged": bool(ping)}
 
 
 # ---------------- 上游系统客户端（spec 驱动） ----------------
