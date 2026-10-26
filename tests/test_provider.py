@@ -51,6 +51,15 @@ def _start_stub():
     return srv
 
 
+def test_mask_and_scrub():
+    """指纹规则与错误信息脱敏。"""
+    assert ai.mask_key("") is None
+    assert ai.mask_key("short") == "…（已配置）"
+    assert ai.mask_key("sk-abcdefghijklmn") == "…klmn"
+    assert ai._scrub("401 Unauthorized key=sk-abcdefghijklmn", "sk-abcdefghijklmn") == \
+        "401 Unauthorized key=…klmn"
+
+
 def test_env_file_loading(tmp_path):
     """Key 从 .env 文件读取，且不覆盖已有的真实环境变量。"""
     envp = tmp_path / "feinao.env"
@@ -91,6 +100,13 @@ def test_real_provider_chain():
         h = ai.providers_health(ping=True)
         stub = [p for p in h["providers"] if p["name"] == "stub"][0]
         assert stub["key"] and stub["ok"] and stub["latency_ms"] >= 0, "ping 体检失败"
+
+        # 硬约束：任何响应都不得出现完整 Key，只回指纹
+        blob = json.dumps(h, ensure_ascii=False)
+        assert "sk-test-1234567890" not in blob, "响应里泄露了完整 Key！"
+        assert stub["hasKey"] is True, "缺 hasKey 标记"
+        assert stub["fingerprint"] == "…7890", "指纹不对：%s" % stub["fingerprint"]
+        assert stub["key_len"] == len("sk-test-1234567890"), "key_len 不对"
 
         # 拔掉 Key → 应降级到 mock，且体检如实报未配置
         os.environ.pop("FEINAO_STUB_KEY", None)
