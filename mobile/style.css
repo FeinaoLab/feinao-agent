@@ -1,0 +1,21 @@
+:root{--pri:#4f46e5;--bg:#f1f5f9}
+*{box-sizing:border-box;margin:0}
+body{font-family:system-ui,"Microsoft YaHei";background:var(--bg);color:#0f172a;font-size:14px;display:flex;flex-direction:column;height:100vh}
+.lg-wrap{display:flex;align-items:center;justify-content:center;flex:1;padding:20px}
+.lg{background:#fff;border-radius:16px;padding:32px 24px;width:100%;max-width:340px;display:flex;flex-direction:column;gap:12px;text-align:center;box-shadow:0 10px 30px rgba(15,23,42,.12)}
+.lg h1{font-size:18px}.lg p{color:#64748b;font-size:12px}
+.lg input{border:1px solid #e2e8f0;border-radius:10px;padding:11px 12px;font-size:15px}
+.lg button{background:var(--pri);border:0;color:#fff;border-radius:10px;padding:12px;font-size:16px;cursor:pointer}
+.lg em{color:#dc2626;font-size:12px;font-style:normal;min-height:16px}
+header{display:flex;align-items:center;gap:8px;padding:10px 14px;background:var(--pri);color:#fff;padding-top:calc(10px + env(safe-area-inset-top))}
+header b{font-size:15px}header span{font-size:12px;opacity:.85;margin-left:auto}
+.chips{display:flex;gap:6px;padding:8px 10px;overflow-x:auto;background:#fff;border-bottom:1px solid #e2e8f0}
+.chips a{flex-shrink:0;padding:6px 12px;border-radius:999px;background:#e2e8f0;font-size:12px;color:#475569;text-decoration:none;cursor:pointer}
+.chips a.on{background:var(--pri);color:#fff}
+.msgs{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px}
+.msg{max-width:82%;padding:9px 12px;border-radius:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word;font-size:13px}
+.msg.me{align-self:flex-end;background:var(--pri);color:#fff}
+.msg.ai{align-self:flex-start;background:#fff}
+.inp{display:flex;gap:8px;padding:8px 10px;background:#fff;border-top:1px solid #e2e8f0;padding-bottom:calc(8px + env(safe-area-inset-bottom))}
+.inp textarea{flex:1;border:1px solid #e2e8f0;border-radius:10px;padding:9px;font-size:14px;resize:none;height:40px;font-family:inherit}
+.inp button{background:var(--pri);border:0;color:#fff;border-radius:10px;padding:0 18px;cursor:pointer}
