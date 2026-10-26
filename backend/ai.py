@@ -183,26 +183,52 @@ def llm_chat(messages, user="system"):
     raise RuntimeError("all providers failed: %s" % last_err)
 
 
+def mask_key(val):
+    """Key 只回指纹：够短的不显示，够长的只留末四位。
+    任何对外响应都不许出现完整 Key —— 见 tests/test_provider.py 的硬断言。"""
+    if not val:
+        return None
+    val = val.strip()
+    if len(val) < 12:
+        return "…（已配置）"
+    return "…" + val[-4:]
+
+
+def _scrub(text, *vals):
+    """把可能混进错误信息的 Key 值抹掉。"""
+    s = str(text)
+    for v in vals:
+        if v and len(v) >= 6:
+            s = s.replace(v, mask_key(v) or "***")
+    return s
+
+
 def providers_health(ping=False):
-    """供应商体检：Key 是否就位；ping=True 时真发一次最小请求验证 Key 有效。"""
+    """供应商体检：Key 是否就位 / 指纹；ping=True 时真发一次最小请求验证 Key 有效。"""
     out = []
     for p in SPEC["providers"]:
         item = {"name": p["name"], "type": p["type"], "model": p.get("model", "-")}
         if p["type"] == "mock":
-            item.update(ok=True, key=False, note="内置兜底，无需 Key")
+            item.update(ok=True, key=False, hasKey=False, fingerprint=None,
+                        note="内置兜底，无需 Key")
             out.append(item)
             continue
-        has = bool(os.environ.get(p.get("key_env", ""), ""))
-        item.update(ok=has, key=has, key_env=p.get("key_env"))
+
+        env_name = p.get("key_env", "")
+        val = os.environ.get(env_name, "").strip()
+        has = bool(val)
+        item.update(ok=has, key=has, hasKey=has, key_env=env_name,
+                    fingerprint=mask_key(val), key_len=len(val))
         if not has:
             item["note"] = "未配置 Key（降级到下一家）"
         elif ping:
             t0 = time.time()
             try:
                 reply = _call_openai(p, [{"role": "user", "content": "回复两个字：在线"}], timeout=20)
-                item.update(ok=True, latency_ms=int((time.time() - t0) * 1000), reply=(reply or "")[:30])
+                item.update(ok=True, latency_ms=int((time.time() - t0) * 1000),
+                            reply=_scrub((reply or "")[:30], val))
             except Exception as e:
-                item.update(ok=False, error=str(e)[:150])
+                item.update(ok=False, error=_scrub(str(e)[:150], val))
         else:
             item["note"] = "Key 已配置（未实测，加 ?ping=1 实测）"
         out.append(item)
