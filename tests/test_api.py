@@ -75,6 +75,32 @@ def test_full():
         st, j = req("/api/conversations", token=tok)
         assert st == 200 and len(j["rows"]) >= 1, "conversations fail"
 
+        # ---- 线上 LCM 链路：服务端持有记忆，前端只发本轮文本 ----
+        st, j = req("/api/chat", "POST", {"text": "项目预算 380 万，对接人王振华，机房在深圳坪山。"}, tok)
+        assert st == 200 and j.get("conv_id") and "context_tokens" in j, "lcm chat fail"
+        conv = j["conv_id"]
+
+        # 灌 24 轮日常对话，把早期事实挤出热区
+        for i in range(24):
+            st, j = req("/api/chat", "POST",
+                        {"text": "第 %d 天：跟客户同步进度，无异常。" % (i + 1), "conv_id": conv}, tok)
+            assert st == 200, "lcm long chat fail at %d" % i
+
+        # 早期事实仍然答得出（摘要/回溯兜底）
+        st, j = req("/api/chat", "POST", {"text": "项目预算是多少？", "conv_id": conv}, tok)
+        assert st == 200 and "380" in j.get("answer", ""), "lcm 早期事实答不上来：%s" % j.get("answer")
+        assert j["stats"]["turns"] >= 26, "turns 统计不对"
+        assert j["stats"]["context_tokens"] <= j["stats"]["budget"], "上下文超预算"
+
+        # 会话列表带轮次
+        st, j = req("/api/lcm_convs", token=tok)
+        assert st == 200 and any(r["id"] == conv and r["turns"] >= 26 for r in j["rows"]), "lcm_convs fail"
+
+        # 供应商体检（无 Key 时应如实报未配置，mock 兜底可用）
+        st, j = req("/api/providers/health", token=tok)
+        assert st == 200 and "deepseek" in j.get("chain", []), "providers health fail"
+        assert any(p["name"] == "mock" and p["ok"] for p in j["providers"]), "mock 应可用"
+
         # ReAct（mock 下一步直接回答）
         st, j = req("/api/ai/react", "POST", {"task": "总结飞系架构"}, tok)
         assert st == 200 and j.get("answer"), "react fail"
