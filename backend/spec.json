@@ -1,0 +1,28 @@
+{
+  "brand": {
+    "name": "飞脑",
+    "full": "飞脑AI Agent网关",
+    "tagline": "一个入口 · 智达全系",
+    "port": 8060
+  },
+  "users": {
+    "admin": "admin123",
+    "ops01": "ops123456",
+    "view01": "view123456"
+  },
+  "providers": [
+    {"name": "deepseek", "type": "openai", "base": "https://api.deepseek.com/v1/chat/completions", "model": "deepseek-chat", "key_env": "FEINAO_DEEPSEEK_KEY"},
+    {"name": "hunyuan", "type": "openai", "base": "https://api.hunyuan.cloud.tencent.com/v1/chat/completions", "model": "hunyuan-turbos-latest", "key_env": "FEINAO_HUNYUAN_KEY"},
+    {"name": "mock", "type": "mock"}
+  ],
+  "upstreams": {
+    "kms": {"label": "飞知KMS", "base": "http://127.0.0.1:8050/kms/", "user": "admin", "pass": "admin123"},
+    "bi": {"label": "飞瞰BI", "base": "http://127.0.0.1:8041/bi/", "user": "admin", "pass": "admin123"},
+    "cc": {"label": "飞音客服", "base": "http://127.0.0.1:8043/cc/", "user": "admin", "pass": "admin123"}
+  },
+  "pilots": {
+    "rag_topk": 5,
+    "nl2api_max_rows": 50,
+    "react_max_steps": 6
+  }
+}
