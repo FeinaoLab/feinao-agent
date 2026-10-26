@@ -6,7 +6,7 @@
 
 ## 核心能力
 - **LLM 多供应商网关**：DeepSeek / 混元 / mock 兜底，按序降级重试（combo 链），用量落库（usage 表）；Key 支持环境变量与 `.env` 文件，无 Key 自动降级 mock
-- **供应商体检**：`GET /api/providers/health[?ping=1]` —— 报 Key 是否就位；ping=1 时真发一次最小请求验证 Key 有效性与延迟
+- **供应商体检**：`GET /api/providers/health[?ping=1]` —— 只回 `hasKey` / `fingerprint`（末四位）/ `key_len`，**任何响应都不出现完整 Key**；ping=1 时真发一次最小请求验证有效性与延迟，错误信息过一遍脱敏
 - **试点1 · 知识问答（RAG）**：SQLite FTS5 检索（LIKE 兜底）+ 带引用回答
 - **试点2 · 智能查数（NL2API）**：自然语言 → 实体匹配（spec 驱动）→ 上游 REST 查询 → LLM 总结；不生成裸 SQL，天然防注入
 - **试点3 · 客服话术**：场景 → 五段式话术生成（可挂知识库参考）
