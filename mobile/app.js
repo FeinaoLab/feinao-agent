@@ -1,5 +1,6 @@
 var CFG = window.APP_CONFIG;
 var TOKEN = localStorage.getItem('feinao_m_token') || '';
+var MCONV = parseInt(localStorage.getItem('feinao_m_conv') || '0', 10) || 0;
 var MODE = 'chat';
 var $ = function (s) { return document.querySelector(s); };
 
@@ -27,8 +28,14 @@ function bubble(cls, txt) {
 
 var ROUTES = {
   chat: function (t) {
-    return api('chat', { method: 'POST', body: { messages: [{ role: 'user', content: t }] } })
-      .then(function (d) { return d.answer; });
+    var body = { text: t };
+    if (MCONV) body.conv_id = MCONV;
+    return api('chat', { method: 'POST', body: body })
+      .then(function (d) {
+        MCONV = d.conv_id; localStorage.setItem('feinao_m_conv', MCONV);
+        return d.answer + '\n\n（会话 #' + d.conv_id + ' · 上下文 ' + d.context_tokens + ' token' +
+          (d.detail_back && d.detail_back.length ? ' · 回溯 #' + d.detail_back.join('、') : '') + '）';
+      });
   },
   ask: function (t) {
     bubble('me', '📚 ' + t);
