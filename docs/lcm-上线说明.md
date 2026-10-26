@@ -80,9 +80,20 @@ python feinao-agent/tools/lcm_compare.py     # 本机配同一把 Key 后执行
 
 ---
 
+## 三·五、Key 只回指纹（2026-10-26 19:15 追加）
+
+参照 dsh-our-free-model 的做法补的：`GET /api/providers/health` 不再只报 true/false，而是回 `hasKey` + `fingerprint`（末四位）+ `key_len`，**完整 Key 在任何响应里都不出现**；ping 失败的错误信息也会过一遍 `_scrub()` 脱敏。
+
+线上实测（临时塞一把假 Key，验完即撤）：
+- 带 Key：`{"hasKey": true, "fingerprint": "…1234", "key_len": 24}`
+- 撤掉后：`{"hasKey": false, "fingerprint": null, "key_len": 0}`
+- 响应全文不含完整 Key；`.env` 已清理干净
+
+硬约束有测试守着：`tests/test_provider.py` 断言响应 JSON 里不得出现完整 Key 字符串。
+
 ## 四、测试与回归
 
-- 本地 `pytest tests/ -q` → **11/11 通过**（API 全链路 1 + LCM 8 + 供应商真实链路 2）
+- 本地 `pytest tests/ -q` → **12/12 通过**（API 全链路 1 + LCM 8 + 供应商真实链路 2 + 指纹脱敏 1）
 - 线上不重启失败、不丢数据：部署脚本先备份到 `/opt/_bak/feinao-before-lcm-<时间戳>.tar.gz`
 - 线上数据库 `feinao.db` 未随包覆盖（打包排除 *.db），老会话数据完整保留
 
