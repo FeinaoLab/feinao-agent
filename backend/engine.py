@@ -113,6 +113,13 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 2 and parts[1] == "providers":
                 return self._json(200, {"providers": [{"name": p["name"], "type": p["type"]} for p in SPEC["providers"]],
                                         "upstreams": {k: v["label"] for k, v in SPEC["upstreams"].items()}})
+            if parts[1:3] == ["providers", "health"]:
+                # GET /api/providers/health?ping=1 —— Key 是否就位 / 真发请求验证
+                me = _auth(self)
+                if not me:
+                    return self._json(401, {"error": "请先登录"})
+                ping = (qs.get("ping", ["0"])[0] in ("1", "true", "yes"))
+                return self._json(200, ai.providers_health(ping=ping))
             if len(parts) == 2 and parts[1] == "dashboard":
                 me = _auth(self)
                 if not me:
@@ -145,6 +152,23 @@ class Handler(BaseHTTPRequestHandler):
                 conn = ai.db()
                 rows = [dict(r) for r in conn.execute(
                     "SELECT id,title,created FROM conversations WHERE user=? ORDER BY id DESC LIMIT 30", (me["user"],))]
+                conn.close()
+                return self._json(200, {"rows": rows})
+            if len(parts) == 2 and parts[1] == "lcm_convs":
+                # GET /api/lcm_convs —— LCM 会话列表（带轮次与最后一句）
+                me = _auth(self)
+                if not me:
+                    return self._json(401, {"error": "请先登录"})
+                conn = ai.db()
+                rows = [dict(r) for r in conn.execute(
+                    "SELECT c.id, c.title, c.created, "
+                    "(SELECT COUNT(*) FROM lcm_msg m WHERE m.conv_id=c.id) turns "
+                    "FROM lcm_conv c WHERE c.user=? ORDER BY c.id DESC LIMIT 30", (me["user"],))]
+                for r in rows:
+                    last = conn.execute(
+                        "SELECT content FROM lcm_msg WHERE conv_id=? ORDER BY seq DESC LIMIT 1",
+                        (r["id"],)).fetchone()
+                    r["last"] = (last["content"][:40] if last else "")
                 conn.close()
                 return self._json(200, {"rows": rows})
             if len(parts) == 2 and parts[1] == "lcm":
@@ -214,6 +238,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, ai.react_run(task, user))
 
             if parts[1:3] == ["chat"]:
+                text = (body.get("text") or "").strip()
+                if text:
+                    # 在线链路走 LCM：会话记忆存在服务端，前端只发本轮这句话。
+                    # 历史摘要 + 最近原文 + 关键词回溯，一起组成本轮上下文。
+                    cid = body.get("conv_id") or None
+                    keep_recent = int(body.get("keep_recent") or 8)
+                    budget = int(body.get("budget") or 1200)
+                    o = lcm.LCM(conv_id=int(cid) if cid else None, user=user, title=text)
+                    out = o.ask(text, keep_recent=keep_recent, budget=budget)
+                    out["stats"] = o.stats(keep_recent=keep_recent, budget=budget)
+                    return self._json(200, out)
                 msgs = body.get("messages") or []
                 if not msgs:
                     return self._json(422, {"error": "messages 必填"})
@@ -283,6 +318,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def run():
     ai.init_db()
+    lcm.init_lcm_db()
     port = int(os.environ.get("FEINAO_PORT", SPEC["brand"]["port"]))
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print("FeiNao %s on :%d" % (SPEC["brand"]["full"], port))
