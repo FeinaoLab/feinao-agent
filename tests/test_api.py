@@ -11,6 +11,12 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PORT = 8060
 BASE = "http://127.0.0.1:%d" % PORT
 
+# 本套测试断言依赖 mock 的确定性输出：强制屏蔽真实 Key（.env 只补缺失的环境变量，
+# 这里显式置空即视为"无 Key"，供应商链会自动降级到 mock）。真实模型链路由
+# test_provider.py（本地协议桩）和 tools/lcm_compare.py（真模型对照）负责。
+for _k in ("FEINAO_QWEN_KEY", "FEINAO_DEEPSEEK_KEY", "FEINAO_HUNYUAN_KEY"):
+    os.environ[_k] = ""
+
 
 def req(path, method="GET", body=None, token=None):
     r = urllib.request.Request(BASE + path, method=method)
