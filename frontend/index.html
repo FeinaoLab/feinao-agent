@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>飞脑AI Agent网关</title>
+<link rel="icon" href="icon.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="lg" class="lg-wrap">
+  <form id="lgf" class="lg">
+    <img src="icon.svg" width="72" height="72">
+    <h1>飞脑 AI Agent 网关</h1>
+    <p>一个入口 · 智达全系</p>
+    <input id="lg-u" placeholder="账号" value="admin" autocomplete="username">
+    <input id="lg-p" type="password" placeholder="密码" autocomplete="current-password">
+    <button>登 录</button>
+    <em id="lg-err"></em>
+  </form>
+</div>
+<div id="main" hidden>
+  <header><img src="icon.svg" width="24" height="24"><b>飞脑</b>
+    <nav id="nav"><a data-k="chat" class="on">对话</a><a data-k="pilots">三试点</a><a data-k="audit">审计</a></nav>
+    <span id="who"></span>
+  </header>
+  <section id="view"></section>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
