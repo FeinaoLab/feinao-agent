@@ -16,6 +16,7 @@ FRONTEND = os.path.abspath(os.path.join(BASE, "..", "frontend"))
 MOBILE = os.path.abspath(os.path.join(BASE, "..", "mobile"))
 
 import ai  # noqa: E402
+import lcm  # noqa: E402
 import json as _json
 
 SPEC = ai.SPEC
@@ -146,6 +147,16 @@ class Handler(BaseHTTPRequestHandler):
                     "SELECT id,title,created FROM conversations WHERE user=? ORDER BY id DESC LIMIT 30", (me["user"],))]
                 conn.close()
                 return self._json(200, {"rows": rows})
+            if len(parts) == 2 and parts[1] == "lcm":
+                # GET /api/lcm?conv_id=N —— 会话的库结构统计与摘要节点（DAG 视图）
+                me = _auth(self)
+                if not me:
+                    return self._json(401, {"error": "请先登录"})
+                cid = int((qs.get("conv_id") or ["0"])[0])
+                if not cid:
+                    return self._json(422, {"error": "conv_id 必填"})
+                o = lcm.LCM(conv_id=cid, user=me["user"])
+                return self._json(200, {"stats": o.stats(), "nodes": o.nodes()})
             return self._json(404, {"error": "not found"})
         except Exception as e:
             return self._json(500, {"error": str(e)[:200]})
@@ -242,6 +253,28 @@ class Handler(BaseHTTPRequestHandler):
                 if not q:
                     return self._json(422, {"error": "q 必填"})
                 return self._json(200, {"hits": ai.rag_search(q)})
+
+            if parts[1:3] == ["ai", "lcm"]:
+                # 无损上下文会话：POST /api/ai/lcm {text, conv_id?, keep_recent?, budget?}
+                text = (body.get("text") or "").strip()
+                if not text:
+                    return self._json(422, {"error": "text 必填"})
+                o = lcm.LCM(conv_id=body.get("conv_id") or None, user=user, title=text)
+                out = o.ask(text,
+                            keep_recent=int(body.get("keep_recent") or 8),
+                            budget=int(body.get("budget") or 1200))
+                out["stats"] = o.stats(keep_recent=int(body.get("keep_recent") or 8),
+                                       budget=int(body.get("budget") or 1200))
+                return self._json(200, out)
+
+            if parts[1:3] == ["ai", "lcm_detail"]:
+                # 回溯：POST /api/ai/lcm_detail {conv_id, q} —— 从原文里捞细节
+                cid = body.get("conv_id")
+                q = (body.get("q") or "").strip()
+                if not cid or not q:
+                    return self._json(422, {"error": "conv_id/q 必填"})
+                o = lcm.LCM(conv_id=int(cid), user=user)
+                return self._json(200, {"hits": o.retrieve(q)})
 
             return self._json(404, {"error": "not found"})
         except Exception as e:
