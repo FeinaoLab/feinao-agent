@@ -11,6 +11,7 @@
     "view01": "view123456"
   },
   "providers": [
+    {"name": "qwen", "type": "openai", "base": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", "model": "qwen-flash", "key_env": "FEINAO_QWEN_KEY"},
     {"name": "deepseek", "type": "openai", "base": "https://api.deepseek.com/v1/chat/completions", "model": "deepseek-chat", "key_env": "FEINAO_DEEPSEEK_KEY"},
     {"name": "hunyuan", "type": "openai", "base": "https://api.hunyuan.cloud.tencent.com/v1/chat/completions", "model": "hunyuan-turbos-latest", "key_env": "FEINAO_HUNYUAN_KEY"},
     {"name": "mock", "type": "mock"}
