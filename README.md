@@ -111,6 +111,23 @@ grading itself. The pass/fail verdict comes from each task's `expect` block, so 
 The candidate is stored as a revision with `active=0`: you benchmark it, then decide whether to
 activate it. Config is swapped in memory only and restored afterwards, sha-verified.
 
+**7. No score. A sentence you can check.**
+The dual run ends with a comparison, not a grade: which tasks moved, in which direction, at what
+cost, and whether the sample is even big enough to say so.
+
+```
+结论：先别上线：1 个任务稳定变坏（react-01），新的失败原因是「没有执行预期动作 search_docs（实际：无）」
+建议：先别上线
+  · 有效性：通过率 1 → 0.75。0 个任务稳定变好、1 个稳定变坏、0 个只差一次判不了、3 个逐条一致
+  · 过程：被策略拒 1 个任务上升（0 → 1）
+注意：这轮走的是 mock 上游（没有真实模型调用）：只说明链路与策略生效，不能当模型能力结论
+```
+
+A single flipped run is never called an improvement: with 3 runs per cell, only a gap of ≥2 runs (or
+a unanimous flip) counts, everything else is reported as "cannot tell — need more runs". Open-ended
+tasks have no ground truth, but two executions of the same task do have a difference, and that is
+the only thing this layer is willing to assert. See `docs/对照式判定-上线说明.md`.
+
 ## Feature map
 
 | Area | Endpoint | Notes |
@@ -129,6 +146,7 @@ activate it. Config is swapped in memory only and restored afterwards, sha-verif
 | Config revisions | `GET /api/harness`, `POST /api/harness/{snapshot,activate}` | spec.json history, semantic diff, atomic rollback with hot reload (admin only) |
 | Effective policy | `GET /api/ai/policy` | Modes, limits, egress whitelist, per-tool policy as currently enforced (secrets stripped) |
 | Benchmark | `GET /api/bench`, `POST /api/bench/run` | Fixed 15-task set run twice (base vs candidate), metrics from real execution facts (admin only) |
+| Verdict | `GET /api/bench/compare?a=&b=` | Plain-language conclusion instead of a score: what moved, at what cost, and whether the sample is enough (admin only) |
 
 Roles out of the box: `admin` / `ops01` / `view01` (admin, ops, viewer).
 
@@ -188,12 +206,13 @@ GET  api/<entity>?limit=20&q=keyword → {rows:[...], total:N}
 ## Tests
 
 ```bash
-python -m pytest tests/ -q      # 65 passed
+python -m pytest tests/ -q      # 76 passed
 ```
 
 Covers the full HTTP chain (real server, mock LLM), LCM recall, the approval lifecycle, memory
 extraction and grounding, the demo upstream contract, config versioning (semantic diff, atomic
-rollback, dirty-JSON rejection), the three loop circuit breakers, and the benchmark dual run
+rollback, dirty-JSON rejection), the three loop circuit breakers, the benchmark dual run, and the
+comparison rules (a single flip is never called an improvement)
 (including a test that a deliberately broken candidate scores lower). CI runs it on Python
 3.9 / 3.11 / 3.13, plus a clone-and-run smoke test that installs **nothing**.
 
@@ -218,6 +237,7 @@ Details and known trade-offs: [SECURITY.md](SECURITY.md).
 - [docs/Harness版本化-上线说明.md](docs/Harness版本化-上线说明.md) — config versioning: snapshot / semantic diff / one-click rollback
 - [docs/策略数据化与卡死上限-上线说明.md](docs/策略数据化与卡死上限-上线说明.md) — policy moved into spec.json + three loop circuit breakers
 - [docs/基准任务集与双跑对照-上线说明.md](docs/基准任务集与双跑对照-上线说明.md) — the fixed task set and how a config change is judged
+- [docs/对照式判定-上线说明.md](docs/对照式判定-上线说明.md) — why there is no score, and how a difference becomes a sentence
 
 ## Contributing
 

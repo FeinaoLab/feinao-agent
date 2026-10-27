@@ -300,6 +300,22 @@ class Handler(BaseHTTPRequestHandler):
                 if out.get("error"):
                     return self._json(404, out)
                 return self._json(200, out)
+            if parts[1:3] == ["bench", "compare"]:
+                # GET /api/bench/compare?a=N[&b=M][&stage_a=base&stage_b=cand]
+                # 不给总分：只给同一批任务两次执行的差，和一句能逐条复核的结论
+                me = _auth(self, roles=("admin",))
+                if not me:
+                    return self._json(403 if me is False else 401, {"error": "请先登录或无权限"})
+                raw_a = (qs.get("a") or [""])[0]
+                raw_b = (qs.get("b") or [""])[0]
+                if not raw_a.isdigit() or (raw_b and not raw_b.isdigit()):
+                    return self._json(422, {"error": "a / b 必须是双跑作业 id"})
+                out = bench.compare(int(raw_a), int(raw_b) if raw_b else None,
+                                    (qs.get("stage_a") or [None])[0],
+                                    (qs.get("stage_b") or [None])[0])
+                if out.get("error"):
+                    return self._json(404, out)
+                return self._json(200, out)
             return self._json(404, {"error": "not found"})
         except Exception as e:
             return self._json(500, {"error": str(e)[:200]})

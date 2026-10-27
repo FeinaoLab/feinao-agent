@@ -114,6 +114,27 @@ jobs:
           assert s["delta"]["ok_rate"] == 0.0, s["delta"]
           print("bench ok: base", s["base"]["ok_rate"], "-> cand", s["cand"]["ok_rate"],
                 "| evidence", s["base"]["evidence_rate"])
+          # 结论行：每格只跑 1 次，所以必须自己声明"样本不足"，不许硬判胜负
+          v = d["verdict"]
+          assert v["suggest"], v
+          assert any("每格只跑了" in c for c in v["caveats"]), v["caveats"]
+          print("verdict:", v["tone"], "|", v["headline"])
+          PY
+
+      # 改坏了必须被抓住：预算清零 → 结论必须是"先别上线"，并点名是哪个动作没跑成。
+      - name: Benchmark catches a regression
+        run: |
+          FEINAO_DB=/tmp/bench2.db python tools/bench.py \
+            --patch tool_policies.search_docs.max_calls_per_run=0 \
+            --tasks react-01 --repeats 2 --json > /tmp/bench2.json
+          python - <<'PY'
+          import json
+          d = json.load(open("/tmp/bench2.json"))
+          v = d["verdict"]
+          assert v["tone"] == "worse", v
+          assert v["suggest"] == "先别上线", v
+          assert "react-01" in v["headline"] and "search_docs" in v["headline"], v["headline"]
+          print("caught:", v["headline"])
           PY
 
       - name: Dump server log on failure

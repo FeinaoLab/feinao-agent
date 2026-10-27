@@ -160,8 +160,8 @@ def test_dual_run_records_metrics_and_restores_spec():
     assert {x["stage"] for x in rows} == {"base", "cand"}
     assert all(x["provider"] for x in rows), "provider 要记下来，否则没法解释差异"
     for x in rows:
-        for k in ("ok", "llm_calls", "steps", "tool_calls", "denied", "approvals",
-                  "tokens", "chars", "evidence", "ms"):
+        for k in ("ok", "llm_calls", "steps", "tool_calls", "denied", "errors", "dups",
+                  "approvals", "tokens", "chars", "evidence", "ms"):
             assert x[k] is not None, "指标 %s 不能是 None" % k
 
     s = r["summary"]
@@ -208,6 +208,13 @@ def test_regression_is_visible():
     bad = s["cand"]["per_task"][0]
     assert bad["denied"] >= 1, "被预算挡住了，denied 应大于 0"
     assert "search_docs" in bad["fails"][0], "失败原因要指名是哪个动作没跑成：%s" % bad["fails"]
+
+    # 结论行必须和数字对得上：这不是"看起来差不多"，是明确变坏
+    v = r["verdict"]
+    assert v["tone"] == "worse", "预算清零应被判成变坏：%s" % v
+    assert v["suggest"] == "先别上线", v
+    assert "react-01" in v["headline"], "结论要点名是哪个任务坏了：%s" % v["headline"]
+    assert "search_docs" in v["headline"], "结论要带上新的失败原因：%s" % v["headline"]
 
 
 # ---------------------------------------------------------------- ④ 守卫
@@ -310,9 +317,23 @@ def test_api_requires_admin():
         assert st == 200 and j.get("ok"), j
         s = j["summary"]
         assert s["base"]["ok_rate"] == 1.0 and s["cand"]["ok_rate"] == 1.0
+        jid = j["job_id"]
 
-        st, j = _req("/api/bench/detail?id=%d" % j["job_id"], token=admin)
+        st, j = _req("/api/bench/detail?id=%d" % jid, token=admin)
         assert st == 200 and len(j["runs"]) == 2, "1 任务 × 1 次 × 2 版本 = 2 条"
+
+        # 结论行：同样的数据，admin 能拿到一句人话（这里每格只跑 1 次，所以只判"加样本"）
+        st, j = _req("/api/bench/compare?a=%d" % jid, token=admin)
+        assert st == 200 and j["verdict"]["tone"] in ("flat", "better", "cheaper"), j
+        assert j["verdict"]["suggest"], "结论必须给建议动作"
+        assert any("每格只跑了" in c for c in j["verdict"]["caveats"]), \
+            "只跑 1 次时必须自己声明样本不足：%s" % j["verdict"]["caveats"]
+        st, _ = _req("/api/bench/compare?a=99999", token=admin)
+        assert st == 404
+        st, _ = _req("/api/bench/compare?a=abc", token=admin)
+        assert st == 422
+        st, _ = _req("/api/bench/compare?a=%d" % jid, token=ops)
+        assert st == 403, "结论行也含执行细节，ops 不该看"
 
         st, _ = _req("/api/bench/run", "POST", {"patch": [{"path": "pilots.rag_topk", "value": 3}],
                                                 "repeats": 9}, token=admin)

@@ -35,8 +35,8 @@ KINDS = ("rag", "nl2api", "script", "react", "approval")
 # 每种任务必须带的字段（缺了跑不了，加载时就报错，别等到跑一半）
 NEEDS = {"rag": ("q",), "nl2api": ("q",), "script": ("scenario",),
          "react": ("goal",), "approval": ("goal",)}
-AVG_KEYS = ("llm_calls", "steps", "tool_calls", "denied", "approvals",
-            "tokens", "chars", "evidence", "ms")
+AVG_KEYS = ("llm_calls", "steps", "tool_calls", "denied", "errors", "dups",
+            "approvals", "tokens", "chars", "evidence", "ms")
 
 _LOCK = threading.Lock()
 
@@ -82,9 +82,15 @@ def init_db():
     CREATE TABLE IF NOT EXISTS bench_run(
         id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INT, stage TEXT, rev_id INT, rev_sha TEXT,
         task_id TEXT, kind TEXT, rep INT, ok INT, fail TEXT, llm_calls INT, steps INT,
-        tool_calls INT, denied INT, approvals INT, tokens INT, chars INT,
+        tool_calls INT, denied INT, errors INT, dups INT, approvals INT, tokens INT, chars INT,
         evidence INT, ms INT, provider TEXT, created TEXT);
     """)
+    # 老库补列：errors / dups 是 P0-3 才记的两个事实（出错动作数、重复动作数），
+    # 历史行留 NULL，比较时按 0 处理（不假装知道）。
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(bench_run)")}
+    for col in ("errors", "dups"):
+        if col not in cols:
+            conn.execute("ALTER TABLE bench_run ADD COLUMN %s INT DEFAULT 0" % col)
     conn.commit()
     conn.close()
 
@@ -139,6 +145,10 @@ def job_detail(job_id):
     if not d:
         return {"error": "双跑作业 #%s 不存在" % job_id}
     d["runs"] = _rows(job_id)
+    try:  # 结论行跟着详情一起给，省一次往返（前端 P2-2 用得上）
+        d["verdict"] = compare(job_id).get("verdict")
+    except Exception:
+        d["verdict"] = None
     return d
 
 
@@ -151,7 +161,8 @@ def overview():
     return {"tasks": tasks, "task_error": err, "jobs": list_jobs(),
             "active": ai.harness_list()["active"], "repeats_default": 3,
             "kinds": list(KINDS),
-            "note": "同一批任务在 base 与候选修订上各跑 N 次；ok 由任务自带 expect 判定，不由模型打总分"}
+            "note": "同一批任务在 base 与候选修订上各跑 N 次；ok 由任务自带 expect 判定，不由模型打总分",
+            "compare_hint": "GET /api/bench/compare?a=<job> 出结论行；只差一次执行的任务会标成「判不了」"}
 
 
 # ---------------------------------------------------------------- 修订与候选
@@ -324,6 +335,26 @@ def judge(task, res):
     return 1, ""
 
 
+def _action_stats(trace):
+    """从 trace（= task_steps 的镜像）里数两个"过程事实"：
+
+    - dups：同一动作、同一参数被执行了不止一次的次数（幂等回放不算，那不是重复执行）
+    - errors：执行出错或降级（畸形输出）的动作数
+
+    这两样以前就在步里躺着，只是从没进过汇总——而"打转"和"报错"恰恰是
+    看起来通过率没变、实际已经变差的两种典型形态。
+    """
+    seen = {}
+    for s in trace:
+        if s.get("obs") and not s.get("replay"):
+            sig = (s.get("tool"),
+                   json.dumps(s.get("args") or {}, sort_keys=True, ensure_ascii=False))
+            seen[sig] = seen.get(sig, 0) + 1
+    dups = sum(v - 1 for v in seen.values() if v > 1)
+    errors = len([s for s in trace if s.get("error") or s.get("degraded")])
+    return dups, errors
+
+
 def _execute(task, user):
     """跑一次任务，返回只含事实的指标（不做判定）。"""
     counter = {"calls": 0, "chars": 0}
@@ -348,6 +379,7 @@ def _execute(task, user):
         ms = int((time.time() - t0) * 1000)
     tokens = _usage_tokens(mark)
     trace = [s for s in (res.get("steps") or []) if isinstance(s, dict)]
+    dups, errors = _action_stats(trace)
     ok, fail = judge(task, res)
     return {
         "ok": ok, "fail": fail,
@@ -355,6 +387,8 @@ def _execute(task, user):
         "steps": len(trace),
         "tool_calls": len([s for s in trace if s.get("obs") and not s.get("replay")]),
         "denied": len([s for s in trace if s.get("denied")]),
+        "errors": errors,
+        "dups": dups,
         "approvals": _approvals_of(res.get("task_id")),
         "tokens": tokens,
         "chars": counter["chars"],
@@ -368,58 +402,387 @@ def _execute(task, user):
 
 # ---------------------------------------------------------------- 汇总
 
-def summarize(job_id):
-    """按 stage 汇总：每个任务先在自己的 N 次重复上取均值，再对任务取宏平均。
+def _delta(base, cand):
+    out = {}
+    for k in ("ok_rate", "evidence_rate", "llm_calls", "steps", "tool_calls", "denied",
+              "errors", "dups", "approvals", "chars", "ms", "tokens"):
+        a, b = base.get(k), cand.get(k)
+        out[k] = None if a is None or b is None else round(b - a, 3)
+    return out
+
+
+def _stage_acc(rows):
+    """把一个 stage 的所有执行记录汇总成一份口径固定的账。
 
     先均后比（而不是把所有执行混在一起），避免某个任务重复次数多就把整体拽歪。
+    除 ok_rate / evidence_rate 外都在 per_task 里保留两位小数，方便"改了多少"看得见。
     """
+    per_task = {}
+    for r in rows:
+        d = per_task.setdefault(r["task_id"], {
+            "task_id": r["task_id"], "kind": r["kind"], "runs": 0, "ok": 0,
+            "fails": [], **{k: 0 for k in AVG_KEYS}})
+        d["runs"] += 1
+        d["ok"] += 1 if r["ok"] else 0
+        for k in AVG_KEYS:
+            d[k] += r[k] or 0
+        if not r["ok"] and r["fail"] and r["fail"] not in d["fails"]:
+            d["fails"].append(r["fail"])
+    per = []
+    for d in per_task.values():
+        n = max(1, d["runs"])
+        item = {"task_id": d["task_id"], "kind": d["kind"], "runs": d["runs"], "ok_n": d["ok"],
+                "ok_rate": round(d["ok"] / n, 3),
+                "evidence_rate": round(d["evidence"] / n, 3),
+                "fails": d["fails"][:2]}
+        for k in ("llm_calls", "steps", "tool_calls", "denied", "errors", "dups",
+                  "approvals", "chars", "ms"):
+            item[k] = round(d[k] / n, 2)
+        item["tokens"] = round(d["tokens"] / n, 1)
+        per.append(item)
+    per.sort(key=lambda x: x["task_id"])
+    acc = {"tasks": len(per), "runs": len(rows)}
+    if per:
+        acc["ok_rate"] = round(sum(p["ok_rate"] for p in per) / len(per), 3)
+        acc["evidence_rate"] = round(sum(p["evidence_rate"] for p in per) / len(per), 3)
+        for k in ("llm_calls", "steps", "tool_calls", "denied", "errors", "dups",
+                  "approvals", "chars", "ms"):
+            acc[k] = round(sum(p[k] for p in per) / len(per), 2)
+        acc["tokens"] = round(sum(p["tokens"] for p in per) / len(per), 1)
+    else:
+        for k in ("ok_rate", "evidence_rate", "llm_calls", "steps", "tool_calls", "denied",
+                  "errors", "dups", "approvals", "chars", "ms", "tokens"):
+            acc[k] = None
+    acc["per_task"] = per
+    acc["providers"] = sorted({(r.get("provider") or "-") for r in rows})
+    return acc
+
+
+def summarize(job_id):
     rows = _rows(job_id)
-    out = {}
-    for stage in ("base", "cand"):
-        srows = [r for r in rows if r["stage"] == stage]
-        per_task, acc = {}, {}
-        for r in srows:
-            d = per_task.setdefault(r["task_id"], {
-                "task_id": r["task_id"], "kind": r["kind"], "runs": 0, "ok": 0,
-                "fails": [], **{k: 0 for k in AVG_KEYS}})
-            d["runs"] += 1
-            d["ok"] += 1 if r["ok"] else 0
-            for k in AVG_KEYS:
-                d[k] += r[k] or 0
-            if not r["ok"] and r["fail"] and r["fail"] not in d["fails"]:
-                d["fails"].append(r["fail"])
-        per = []
-        for d in per_task.values():
-            n = max(1, d["runs"])
-            item = {"task_id": d["task_id"], "kind": d["kind"], "runs": d["runs"],
-                    "ok_rate": round(d["ok"] / n, 3),
-                    "evidence_rate": round(d["evidence"] / n, 3),
-                    "fails": d["fails"][:2]}
-            for k in ("llm_calls", "steps", "tool_calls", "denied", "approvals", "tokens", "chars", "ms"):
-                item[k] = round(d[k] / n, 2 if k != "tokens" else 1)
-            per.append(item)
-        per.sort(key=lambda x: x["task_id"])
-        acc["tasks"] = len(per)
-        acc["runs"] = len(srows)
-        if per:
-            acc["ok_rate"] = round(sum(p["ok_rate"] for p in per) / len(per), 3)
-            acc["evidence_rate"] = round(sum(p["evidence_rate"] for p in per) / len(per), 3)
-            for k in ("llm_calls", "steps", "tool_calls", "denied", "approvals", "chars", "ms"):
-                acc[k] = round(sum(p[k] for p in per) / len(per), 2)
-            acc["tokens"] = round(sum(p["tokens"] for p in per) / len(per), 1)
-        else:
-            for k in ("ok_rate", "evidence_rate", "llm_calls", "steps", "tool_calls",
-                      "denied", "approvals", "chars", "ms", "tokens"):
-                acc[k] = None
-        acc["per_task"] = per
-        out[stage] = acc
-    delta = {}
-    for k in ("ok_rate", "evidence_rate", "llm_calls", "steps", "tool_calls",
-              "denied", "approvals", "chars", "ms", "tokens"):
-        a, b = out["base"].get(k), out["cand"].get(k)
-        delta[k] = None if a is None or b is None else round(b - a, 3)
-    out["delta"] = delta
+    out = {"base": _stage_acc([r for r in rows if r["stage"] == "base"]),
+           "cand": _stage_acc([r for r in rows if r["stage"] == "cand"])}
+    out["delta"] = _delta(out["base"], out["cand"])
     return out
+
+
+# ---------------------------------------------------------------- 对照式判定（P0-3）
+#
+# 这一层不产出任何"分数"。开放任务没有标准答案，给 87 分只是把不确定性藏进一个数字里；
+# 能站得住的只有一件事：同一批任务、两次执行、差在哪里。所以这里的输出是
+#   ① 逐任务判稳（变好 / 变坏 / 判不了 / 没变）
+#   ② 代价与过程指标的方向
+#   ③ 一句人话结论 + 建议动作（能上线 / 先别上 / 加样本再判 / 任务集没覆盖）
+# 判稳规则故意保守：只差一次执行的，一律写"判不了"，不写"变好"。
+
+METRICS = (
+    # key, 中文名, 比较口径, 阈值（rel 用相对变化，abs 用绝对值）
+    ("ok_rate", "通过率", "abs", 0.005),
+    ("evidence_rate", "证据覆盖", "abs", 0.050),
+    ("steps", "单任务步数", "rel", 0.100),
+    ("tool_calls", "工具调用", "rel", 0.100),
+    ("tokens", "token", "rel", 0.150),
+    ("denied", "被策略拒", "abs", 0.500),
+    ("errors", "执行出错", "abs", 0.500),
+    ("dups", "重复动作", "abs", 0.500),
+    ("approvals", "人工介入", "abs", 0.500),
+)
+
+
+def _num(x):
+    """给人看的数字：整数不带小数点，小数最多两位。"""
+    if x is None:
+        return "—"
+    if isinstance(x, float):
+        if abs(x) >= 1000:
+            return "%.0f" % x
+        return ("%.2f" % x).rstrip("0").rstrip(".")
+    return str(x)
+
+
+def _pct_txt(a, b):
+    if not a or b is None:
+        return "—"
+    return "%+.0f%%" % ((b - a) / abs(a) * 100)
+
+
+def _metric_diff(key, name, how, eps, a, b):
+    """一个指标的差：值、百分比、方向。方向只分 up / down / flat / unknown 四档。"""
+    d = None if (a is None or b is None) else round(b - a, 3)
+    pct = None if (not a or b is None) else round((b - a) / abs(a) * 100, 1)
+    if d is None:
+        direction = "unknown"
+    elif how == "rel":
+        if a and b is not None:
+            direction = "flat" if abs(pct) < eps * 100 else ("up" if d > 0 else "down")
+        else:  # 分母为 0：只看绝对量
+            direction = "flat" if abs(d) < eps * 10 else ("up" if d > 0 else "down")
+    else:
+        direction = "flat" if abs(d) < eps else ("up" if d > 0 else "down")
+    return {"key": key, "name": name, "a": a, "b": b, "diff": d, "pct": pct,
+            "dir": direction,
+            "text": "%s → %s（%s）" % (_num(a), _num(b),
+                                      _pct_txt(a, b) if how == "rel" else ("%+.2f" % d if d is not None else "—"))}
+
+
+def _task_verdict(pa, pb):
+    """单任务判稳。返回 better / worse / unclear / same / new / gone。
+
+    每格只跑 1 次时任何差异都可能是抖动，所以 runs < 2 一律 unclear；
+    runs ≥ 2 时，要么差 ≥ 2 次执行，要么两侧都是"全中/全失"，才算数。
+    """
+    if not pa or not pb:
+        return "new" if pb else "gone"
+    diff = pb["ok_n"] - pa["ok_n"]
+    if diff == 0:
+        return "same"
+    runs = min(pa["runs"], pb["runs"])
+    if runs < 2:
+        return "unclear"
+    unanimous = pa["ok_n"] in (0, pa["runs"]) and pb["ok_n"] in (0, pb["runs"])
+    if abs(diff) >= 2 or unanimous:
+        return "better" if diff > 0 else "worse"
+    return "unclear"
+
+
+def _cost_txt(diff, prefix=True):
+    tk, st = diff["tokens"], diff["steps"]
+    parts = []
+    for d in (tk, st):
+        if d["dir"] != "flat" and d["pct"] is not None:
+            parts.append("%s %s" % (d["name"], _pct_txt(d["a"], d["b"])))
+    if not parts:
+        return "代价基本没动（token、步数都在 ±15% 内）"
+    return ("代价 " if prefix else "") + "、".join(parts)
+
+
+def _proc_rollup(tasks):
+    """过程指标按"多少个任务发生了变化"来数，而不是宏平均。
+
+    宏平均会把"1 个任务被拦了 5 次"摊薄成 0.05，看起来像没发生；而权限收紧
+    恰恰是这种形态——只影响少数任务。所以这里数任务数，并给一个最极端的例子。
+    """
+    out = []
+    for key, name in (("denied", "被策略拒"), ("errors", "执行出错"),
+                      ("dups", "重复动作"), ("approvals", "人工介入")):
+        deltas = [(t.get(key + "_b") or 0) - (t.get(key + "_a") or 0) for t in tasks]
+        up = sum(1 for d in deltas if d >= 0.5)
+        down = sum(1 for d in deltas if d <= -0.5)
+        if not up and not down:
+            continue
+        if up >= down:
+            worst = max(tasks, key=lambda t: (t.get(key + "_b") or 0) - (t.get(key + "_a") or 0))
+            out.append("%s %d 个任务上升（%s → %s）"
+                       % (name, up, _num(worst.get(key + "_a")), _num(worst.get(key + "_b"))))
+        else:
+            best = min(tasks, key=lambda t: (t.get(key + "_b") or 0) - (t.get(key + "_a") or 0))
+            out.append("%s %d 个任务下降（%s → %s）"
+                       % (name, down, _num(best.get(key + "_a")), _num(best.get(key + "_b"))))
+    return out
+
+
+def _verdict(A, B, diff, buckets, kinds, tasks, repeats):
+    """把差异归纳成人话。结论行必须能被逐条复核，所以每条都带数字。"""
+    nb, nw, nu = len(buckets["better"]), len(buckets["worse"]), len(buckets["unclear"])
+    ns = len(buckets["same"])
+    ok_a, ok_b = A.get("ok_rate"), B.get("ok_rate")
+    tk, st = diff["tokens"], diff["steps"]
+    ev = diff["evidence_rate"]
+    cost_up = tk["dir"] == "up" or st["dir"] == "up"
+    cost_down = tk["dir"] == "down" or st["dir"] == "down"
+    lines, caveats = [], []
+
+    # ① 有效性：先看"能不能完成任务"，这是唯一的硬指标
+    if nb or nw or nu:
+        lines.append("有效性：通过率 %s → %s。%d 个任务稳定变好、%d 个稳定变坏、"
+                     "%d 个只差一次判不了、%d 个逐条一致"
+                     % (_num(ok_a), _num(ok_b), nb, nw, nu, ns))
+    else:
+        lines.append("有效性：通过率 %s → %s，%d 个任务的通过与否逐条一致"
+                     % (_num(ok_a), _num(ok_b), A["tasks"]))
+    # ② 代价
+    lines.append(_cost_txt(diff))
+    # ③ 过程：被拒 / 出错 / 打转 / 人工介入（按"多少个任务变了"数，不摊平）
+    proc = _proc_rollup(tasks)
+    if proc:
+        lines.append("过程：" + "；".join(proc))
+    # ④ 证据
+    if ev["a"] is not None:
+        lines.append("证据：覆盖 %s → %s" % (_num(ev["a"]), _num(ev["b"])))
+    # ⑤ 按能力：哪类任务吃到了这轮改动
+    kd = [k for k in kinds if kinds[k]["better"] or kinds[k]["worse"]]
+    if kd:
+        lines.append("按能力：" + "；".join(
+            "%s %s→%s" % (kinds[k]["label"], _num(kinds[k]["ok_a"]), _num(kinds[k]["ok_b"]))
+            for k in kd))
+
+    # 结论行：先判"能不能上"，再判"值不值"
+    if nw and not nb:
+        tone = "worse"
+        ids = "、".join(t["task_id"] for t in buckets["worse"][:3])
+        why = next((f for t in buckets["worse"] for f in t["new_fails"]), "")
+        headline = "先别上线：%d 个任务稳定变坏（%s）%s" % (
+            nw, ids, "，新的失败原因是「%s」" % why if why else "")
+        suggest = "先别上线"
+    elif nb and not nw:
+        tone = "better"
+        head = "可以上线：%d 个任务稳定变好，没有任务变坏" % nb
+        if cost_up and tk["pct"] is not None and tk["pct"] >= 50:
+            head += "，但 token %s，这个价先算一下划不划算" % _pct_txt(tk["a"], tk["b"])
+            suggest = "能上线，先算成本"
+        else:
+            head += "，" + _cost_txt(diff)
+            suggest = "可以上线"
+        headline = head
+    elif nb and nw:
+        tone = "mixed"
+        ids = "、".join(t["task_id"] for t in buckets["worse"][:3])
+        headline = ("有得有失：%d 好 / %d 坏（%s 变坏），通过率净额 %+.3f —— "
+                    "这不是改善，是换了个坑，先看坏的那几个是不是同一类任务"
+                    % (nb, nw, ids, (ok_b or 0) - (ok_a or 0)))
+        suggest = "加样本再判"
+    elif cost_up:
+        tone = "wash"
+        headline = "只买到成本：通过率没变（%s），%s" % (_num(ok_a), _cost_txt(diff))
+        suggest = "别上（除非本来就想慢一点）"
+    elif cost_down:
+        tone = "cheaper"
+        headline = "白捡的省：通过率没变（%s），%s" % (_num(ok_a), _cost_txt(diff))
+        suggest = "可以上（省成本）"
+    else:
+        tone = "flat"
+        headline = ("测不出差别：%d 个任务逐条一致，代价也没动 —— 要么这轮改动对这批任务"
+                    "没有影响，要么任务集还没覆盖到它影响的地方" % A["tasks"])
+        suggest = "任务集没覆盖，先补任务"
+    if tone in ("wash", "cheaper", "flat") and nu:
+        headline += "；另有 %d 个任务只差一次执行，加样本才判得了" % nu
+
+    # 诚实话：这些会让结论失效的前提，必须跟着结论一起给
+    if repeats < 2:
+        caveats.append("每格只跑了 %d 次：通过率差异和随机波动分不开，要下结论请 --repeats 3" % repeats)
+    if nu and repeats >= 2:
+        caveats.append("%d 个任务只差 1 次执行（%s）：样本内可能只是抖动，别当结论"
+                       % (nu, "、".join(t["task_id"] for t in buckets["unclear"][:3])))
+    prov = [p for p in (A.get("providers") or []) + (B.get("providers") or [])
+            if p and p != "-"]
+    if prov and all("mock" in p.lower() for p in prov):
+        caveats.append("这轮走的是 mock 上游（没有真实模型调用）：只说明链路与策略生效，不能当模型能力结论")
+    if A["tasks"] < 10:
+        caveats.append("只跑了 %d 个任务：宏平均容易被单个任务带偏" % A["tasks"])
+    if ev["a"] == 0 and ev["b"] == 0:
+        caveats.append("两版证据覆盖都是 0：这些通道本来就不落 evidence，不是退步")
+
+    return {"tone": tone, "headline": headline, "suggest": suggest,
+            "lines": lines, "caveats": caveats,
+            "decisive": {"better": nb, "worse": nw, "unclear": nu, "same": ns}}
+
+
+KIND_LABEL = {"rag": "RAG", "nl2api": "NL2API", "script": "话术",
+              "react": "ReAct", "approval": "审批"}
+
+
+def compare(job_a, job_b=None, stage_a=None, stage_b=None):
+    """对照两次执行，产出结构化差异 + 一句人话结论。
+
+    默认比同一轮双跑里的 base 与 cand；给 job_b 则跨轮比（默认两轮都取 cand 阶段，
+    也就是"改完再改一版，第二版比第一版好不好"）。
+    """
+    ja = _job_row(job_a)
+    if not ja:
+        return {"error": "双跑作业 #%s 不存在" % job_a}
+    if job_b:
+        jb = _job_row(job_b)
+        if not jb:
+            return {"error": "双跑作业 #%s 不存在" % job_b}
+        sa, sb = (stage_a or "cand"), (stage_b or "cand")
+    else:
+        jb, sa, sb = ja, (stage_a or "base"), (stage_b or "cand")
+
+    rows_a = [r for r in _rows(ja["id"]) if r["stage"] == sa]
+    rows_b = [r for r in _rows(jb["id"]) if r["stage"] == sb]
+    if not rows_a or not rows_b:
+        return {"error": "没有可比数据：作业 #%s 的 %s 阶段 %d 条，作业 #%s 的 %s 阶段 %d 条"
+                         % (ja["id"], sa, len(rows_a), jb["id"], sb, len(rows_b))}
+    A, B = _stage_acc(rows_a), _stage_acc(rows_b)
+
+    # 两次跑的任务集不一样时不能直接比宏平均（分母都不是同一批任务），
+    # 先取交集，只比两边都跑过的；缺的那些列出来但不参与结论。
+    ta = {p["task_id"]: p for p in A["per_task"]}
+    tb = {p["task_id"]: p for p in B["per_task"]}
+    common = set(ta) & set(tb)
+    if not common:
+        return {"error": "两次执行没有共同任务，比不了"}
+    only_a = sorted(set(ta) - common)
+    only_b = sorted(set(tb) - common)
+    if only_a or only_b:
+        rows_a = [r for r in rows_a if r["task_id"] in common]
+        rows_b = [r for r in rows_b if r["task_id"] in common]
+        A, B = _stage_acc(rows_a), _stage_acc(rows_b)
+        ta = {k: v for k, v in ta.items() if k in common}
+        tb = {k: v for k, v in tb.items() if k in common}
+
+    diff = {key: _metric_diff(key, name, how, eps, A.get(key), B.get(key))
+            for key, name, how, eps in METRICS}
+
+    buckets = {"better": [], "worse": [], "unclear": [], "same": []}
+    tasks = []
+    for tid in sorted(common):
+        pa, pb = ta.get(tid), tb.get(tid)
+        v = _task_verdict(pa, pb)
+        ref = pb or pa
+        row = {"task_id": tid, "kind": ref["kind"], "verdict": v,
+               "runs_a": (pa or {}).get("runs", 0), "runs_b": (pb or {}).get("runs", 0),
+               "ok_n_a": (pa or {}).get("ok_n"), "ok_n_b": (pb or {}).get("ok_n"),
+               "ok_a": (pa or {}).get("ok_rate"), "ok_b": (pb or {}).get("ok_rate"),
+               "steps_a": (pa or {}).get("steps"), "steps_b": (pb or {}).get("steps"),
+               "tokens_a": (pa or {}).get("tokens"), "tokens_b": (pb or {}).get("tokens"),
+               "fails_a": (pa or {}).get("fails") or [], "fails_b": (pb or {}).get("fails") or []}
+        for k in ("denied", "errors", "dups", "approvals"):
+            row[k + "_a"] = (pa or {}).get(k)
+            row[k + "_b"] = (pb or {}).get(k)
+        row["new_fails"] = [f for f in row["fails_b"] if f not in row["fails_a"]]
+        tasks.append(row)
+        if v in buckets:
+            buckets[v].append(row)
+
+    kinds = {}
+    for t in tasks:
+        k = kinds.setdefault(t["kind"], {"kind": t["kind"], "label": KIND_LABEL.get(t["kind"], t["kind"]),
+                                         "tasks": 0, "better": 0, "worse": 0, "unclear": 0,
+                                         "same": 0, "ok_a": 0.0, "ok_b": 0.0})
+        k["tasks"] += 1
+        if t["verdict"] in k:
+            k[t["verdict"]] += 1
+        k["ok_a"] += t["ok_a"] or 0
+        k["ok_b"] += t["ok_b"] or 0
+    for k in kinds.values():
+        n = max(1, k["tasks"])
+        k["ok_a"] = round(k["ok_a"] / n, 3)
+        k["ok_b"] = round(k["ok_b"] / n, 3)
+
+    verdict = _verdict(A, B, diff, buckets, kinds, tasks, int(ja.get("repeats") or 1))
+    if only_a or only_b:
+        verdict["caveats"].insert(
+            0, "两次执行的任务集不同（A 独有 %d 个、B 独有 %d 个），只比了共同的 %d 个任务"
+               % (len(only_a), len(only_b), len(common)))
+    rev_a = ja["base_rev"] if sa == "base" else ja["cand_rev"]
+    sha_a = ja["base_sha"] if sa == "base" else ja["cand_sha"]
+    rev_b = jb["base_rev"] if sb == "base" else jb["cand_rev"]
+    sha_b = jb["base_sha"] if sb == "base" else jb["cand_sha"]
+    return {
+        "a": {"job": ja["id"], "stage": sa, "rev": rev_a, "sha": sha_a,
+              "ok_rate": A.get("ok_rate"), "tasks": A["tasks"], "runs": A["runs"],
+              "providers": A.get("providers")},
+        "b": {"job": jb["id"], "stage": sb, "rev": rev_b, "sha": sha_b,
+              "ok_rate": B.get("ok_rate"), "tasks": B["tasks"], "runs": B["runs"],
+              "providers": B.get("providers")},
+        "verdict": verdict,
+        "diff": {k: {kk: vv for kk, vv in v.items() if kk != "key"} for k, v in diff.items()},
+        "by_task": tasks,
+        "by_kind": [kinds[k] for k in sorted(kinds)],
+        "scope": {"common": sorted(common), "only_a": only_a, "only_b": only_b},
+        "note": "不给总分：只给同一批任务两次执行的差，以及一句能逐条复核的结论",
+    }
 
 
 # ---------------------------------------------------------------- 跑一轮
@@ -496,12 +859,13 @@ def run_job(base_rev=None, cand_rev=None, patch=None, task_ids=None, repeats=3,
                         conn = ai.db()
                         conn.execute(
                             "INSERT INTO bench_run(job_id,stage,rev_id,rev_sha,task_id,kind,rep,ok,fail,"
-                            "llm_calls,steps,tool_calls,denied,approvals,tokens,chars,evidence,ms,provider,created) "
-                            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            "llm_calls,steps,tool_calls,denied,errors,dups,approvals,tokens,chars,"
+                            "evidence,ms,provider,created) "
+                            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                             (job_id, stage, rev["id"], rev["sha"], t["id"], t["kind"], rep,
                              m["ok"], m["fail"], m["llm_calls"], m["steps"], m["tool_calls"],
-                             m["denied"], m["approvals"], m["tokens"], m["chars"], m["evidence"],
-                             m["ms"], m["provider"], ai._now()))
+                             m["denied"], m["errors"], m["dups"], m["approvals"], m["tokens"],
+                             m["chars"], m["evidence"], m["ms"], m["provider"], ai._now()))
                         conn.commit()
                         conn.close()
         except Exception as e:
@@ -532,6 +896,10 @@ def run_job(base_rev=None, cand_rev=None, patch=None, task_ids=None, repeats=3,
                "cand_rev": cand["id"], "base_sha": base["sha"], "cand_sha": cand["sha"],
                "tasks": len(tasks), "repeats": repeats, "restored": restored,
                "summary": summary}
+        try:  # 结论行随跑随给；判不了也不该让整轮失败
+            out["verdict"] = compare(job_id)["verdict"]
+        except Exception as e:
+            out["verdict"] = {"tone": "unknown", "headline": "结论生成失败：%s" % str(e)[:120]}
         if err:
             out["error"] = err
         return out
