@@ -328,6 +328,10 @@ def judge(task, res):
                 "/".join(exp["tool_any"]), "/".join([u for u in used if u]) or "无")
     if exp.get("status_any") and res.get("status") not in exp["status_any"]:
         return 0, "状态是 %s，预期 %s" % (res.get("status"), "/".join(exp["status_any"]))
+    if exp.get("min_sources") is not None:
+        n = len(res.get("sources") or res.get("refs") or [])
+        if n < int(exp["min_sources"]):
+            return 0, "只召回 %s 个来源，少于预期 %s（检索深度不够或关键词没覆盖）" % (n, exp["min_sources"])
     if exp.get("min_rows") is not None and int(res.get("rows") or 0) < int(exp["min_rows"]):
         return 0, "只查到 %s 条，少于预期 %s" % (res.get("rows"), exp["min_rows"])
     if exp.get("max_steps") is not None and len(res.get("steps") or []) > int(exp["max_steps"]):
@@ -900,6 +904,21 @@ def run_job(base_rev=None, cand_rev=None, patch=None, task_ids=None, repeats=3,
             out["verdict"] = compare(job_id)["verdict"]
         except Exception as e:
             out["verdict"] = {"tone": "unknown", "headline": "结论生成失败：%s" % str(e)[:120]}
+        # 经验层（P1-1）：把这一轮"什么改法、什么效果"写进 decision 记忆，注入给编辑者
+        if restored and not err:
+            try:
+                import memory
+                v = out.get("verdict") or {}
+                paths = ",".join(str(p.get("path")) for p in (patch or [])) or \
+                        ("修订#%s" % cand.get("id"))
+                memory.decision_write(
+                    "harness:bench:%s" % (",".join(sorted(set(t["kind"] for t in tasks))) or "mixed"),
+                    "双跑#%d（%s）：%s 在 %d 个任务上 ok_rate %s→%s，结论「%s」"
+                    % (job_id, paths, (note or "无备注"), len(tasks),
+                       summary["base"]["ok_rate"], summary["cand"]["ok_rate"],
+                       v.get("tone") or "unknown"), by=by or "system")
+            except Exception:
+                pass  # 经验写不进去不影响双跑本身
         if err:
             out["error"] = err
         return out

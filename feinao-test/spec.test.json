@@ -8,18 +8,58 @@
   "users": {
     "admin": "admin123",
     "ops01": "ops123456",
-    "view01": "view123456"
+    "view01": "view123456",
+    "editor01": "edit123456"
   },
   "providers": [
-    {"name": "qwen", "type": "openai", "base": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", "model": "qwen-flash", "key_env": "FEINAO_QWEN_KEY"},
-    {"name": "deepseek", "type": "openai", "base": "https://api.deepseek.com/v1/chat/completions", "model": "deepseek-chat", "key_env": "FEINAO_DEEPSEEK_KEY"},
-    {"name": "hunyuan", "type": "openai", "base": "https://api.hunyuan.cloud.tencent.com/v1/chat/completions", "model": "hunyuan-turbos-latest", "key_env": "FEINAO_HUNYUAN_KEY"},
-    {"name": "mock", "type": "mock"}
+    {
+      "name": "qwen",
+      "type": "openai",
+      "base": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+      "model": "qwen-flash",
+      "key_env": "FEINAO_QWEN_KEY"
+    },
+    {
+      "name": "deepseek",
+      "type": "openai",
+      "base": "https://api.deepseek.com/v1/chat/completions",
+      "model": "deepseek-chat",
+      "key_env": "FEINAO_DEEPSEEK_KEY"
+    },
+    {
+      "name": "hunyuan",
+      "type": "openai",
+      "base": "https://api.hunyuan.cloud.tencent.com/v1/chat/completions",
+      "model": "hunyuan-turbos-latest",
+      "key_env": "FEINAO_HUNYUAN_KEY"
+    },
+    {
+      "name": "mock",
+      "type": "mock"
+    }
   ],
   "upstreams": {
-    "kms": {"label": "飞知KMS（本地假上游）", "base": "http://127.0.0.1:8199/kms/", "demo_base": "http://127.0.0.1:8199/kms/", "user": "admin", "pass": "local-only"},
-    "bi": {"label": "飞瞰BI（本地假上游）", "base": "http://127.0.0.1:8199/bi/", "demo_base": "http://127.0.0.1:8199/bi/", "user": "admin", "pass": "local-only"},
-    "cc": {"label": "飞音客服（本地假上游）", "base": "http://127.0.0.1:8199/cc/", "demo_base": "http://127.0.0.1:8199/cc/", "user": "admin", "pass": "local-only"}
+    "kms": {
+      "label": "飞知KMS（本地假上游）",
+      "base": "http://127.0.0.1:8199/kms/",
+      "demo_base": "http://127.0.0.1:8199/kms/",
+      "user": "admin",
+      "pass": "local-only"
+    },
+    "bi": {
+      "label": "飞瞰BI（本地假上游）",
+      "base": "http://127.0.0.1:8199/bi/",
+      "demo_base": "http://127.0.0.1:8199/bi/",
+      "user": "admin",
+      "pass": "local-only"
+    },
+    "cc": {
+      "label": "飞音客服（本地假上游）",
+      "base": "http://127.0.0.1:8199/cc/",
+      "demo_base": "http://127.0.0.1:8199/cc/",
+      "user": "admin",
+      "pass": "local-only"
+    }
   },
   "demo": {
     "default": true,
@@ -34,12 +74,30 @@
   "modes": {
     "default": "default",
     "definitions": {
-      "plan":    {"read": "allow", "write": "suspend", "dangerous": "deny"},
-      "default": {"read": "allow", "write": "confirm", "dangerous": "confirm"},
-      "auto":    {"read": "allow", "write": "confirm", "dangerous": "confirm"},
-      "yolo":    {"read": "allow", "write": "allow",   "dangerous": "allow"}
+      "plan": {
+        "read": "allow",
+        "write": "suspend",
+        "dangerous": "deny"
+      },
+      "default": {
+        "read": "allow",
+        "write": "confirm",
+        "dangerous": "confirm"
+      },
+      "auto": {
+        "read": "allow",
+        "write": "confirm",
+        "dangerous": "confirm"
+      },
+      "yolo": {
+        "read": "allow",
+        "write": "allow",
+        "dangerous": "allow"
+      }
     },
-    "yolo_allowed_roles": []
+    "yolo_allowed_roles": [
+      "admin"
+    ]
   },
   "limits": {
     "max_steps": 20,
@@ -49,9 +107,15 @@
   },
   "egress": {
     "enabled": false,
-    "allow_schemes": ["http", "https"],
+    "allow_schemes": [
+      "http",
+      "https"
+    ],
     "allow_domains": [],
-    "allow_ports": [80, 443],
+    "allow_ports": [
+      80,
+      443
+    ],
     "trust_upstream_origins": true,
     "deny_private_networks": true,
     "deny_metadata_endpoints": true,
@@ -60,7 +124,9 @@
   },
   "approval": {
     "name": "飞审审批工作台（测试）",
-    "approvers": ["admin"],
+    "approvers": [
+      "admin"
+    ],
     "allow_self": true,
     "ttl_minutes": 1440
   },
@@ -72,8 +138,36 @@
     "max_text": 140
   },
   "tool_policies": {
-    "search_docs": {"class": "read", "max_calls_per_run": 3, "roles": ["admin", "ops", "viewer"], "requires_confirm": false, "timeout_seconds": 10},
-    "query_system": {"class": "read", "max_calls_per_run": 2, "roles": ["admin", "ops"], "requires_confirm": false, "timeout_seconds": 15},
-    "ingest_doc": {"class": "write", "max_calls_per_run": 1, "roles": ["admin", "ops"], "requires_confirm": true, "timeout_seconds": 30}
+    "search_docs": {
+      "class": "read",
+      "max_calls_per_run": 3,
+      "roles": [
+        "admin",
+        "ops",
+        "viewer"
+      ],
+      "requires_confirm": false,
+      "timeout_seconds": 10
+    },
+    "query_system": {
+      "class": "read",
+      "max_calls_per_run": 2,
+      "roles": [
+        "admin",
+        "ops"
+      ],
+      "requires_confirm": false,
+      "timeout_seconds": 15
+    },
+    "ingest_doc": {
+      "class": "write",
+      "max_calls_per_run": 1,
+      "roles": [
+        "admin",
+        "ops"
+      ],
+      "requires_confirm": true,
+      "timeout_seconds": 30
+    }
   }
 }

@@ -143,7 +143,7 @@ python tools/lcm_compare.py      # 对照实验：常规截断 vs LCM vs LCM+回
 ## 测试
 
 ```bash
-python -m pytest tests/ -q     # 83 项：API 全链路 + LCM + 审批 + 记忆 + 演示上游契约 + 配置版本化 + 卡死上限 + 基准双跑 + 对照判定 + 本地测试环境护栏
+python -m pytest tests/ -q     # 90 项：API 全链路 + LCM + 审批 + 记忆 + 演示上游契约 + 配置版本化 + 卡死上限 + 基准双跑 + 对照判定 + 本地测试环境护栏
 ```
 
 CI（`.github/workflows/ci.yml`）在 Python 3.9 / 3.11 / 3.13 上跑全套，另有一个

@@ -228,7 +228,7 @@ acceptance go green will turn that test red.
 ## Tests
 
 ```bash
-python -m pytest tests/ -q      # 83 passed
+python -m pytest tests/ -q      # 90 passed
 ```
 
 Covers the full HTTP chain (real server, mock LLM), LCM recall, the approval lifecycle, memory

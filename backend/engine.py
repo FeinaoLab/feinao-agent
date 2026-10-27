@@ -128,6 +128,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not me:
                     return self._json(401, {"error": "请先登录"})
                 return self._json(200, ai.policy_effective())
+            if parts[1:3] == ["skills"]:
+                # GET /api/skills —— 技能注册表（登录即可读；改动走 POST，admin 专属）
+                me = _auth(self)
+                if not me:
+                    return self._json(401, {"error": "请先登录"})
+                return self._json(200, {"skills": ai.skills_list(enabled_only=False)})
             if len(parts) == 2 and parts[1] == "dashboard":
                 me = _auth(self)
                 if not me:
@@ -370,8 +376,14 @@ class Handler(BaseHTTPRequestHandler):
                 task = (body.get("task") or "").strip()
                 if not task and not body.get("task_id"):
                     return self._json(422, {"error": "task 必填（续跑时 task 可空）"})
-                return self._json(200, ai.react_run(task or "（续跑）", user,
-                                                    task_id=body.get("task_id")))
+                r = ai.react_run(task or "（续跑）", user,
+                                 task_id=body.get("task_id"),
+                                 mode=body.get("mode"))
+                if isinstance(r, dict) and r.get("error") and "未知模式" in r["error"]:
+                    return self._json(422, r)
+                if isinstance(r, dict) and r.get("error") and "yolo" in r["error"]:
+                    return self._json(403, r)
+                return self._json(200, r)
 
             if parts[1:3] == ["approvals", "decide"]:
                 # POST /api/approvals/decide {id, decision: approved|rejected, note?}
@@ -412,6 +424,33 @@ class Handler(BaseHTTPRequestHandler):
                 if r.get("error"):
                     return self._json(422, r)
                 return self._json(200, r)
+
+            if parts[1:3] == ["harness", "patch"]:
+                # POST /api/harness/patch {patch:[{path,value}], note?} —— 编辑者提补丁：
+                # 只落 active=0 修订 + 挂审批单，不碰生效配置；放行才会激活
+                r = ai.harness_patch(body.get("patch"), body.get("note", ""), by=user)
+                if not r.get("ok"):
+                    return self._json(403 if "无权" in (r.get("error") or "") else 422, r)
+                return self._json(200, r)
+
+            if parts[1:3] == ["skills"]:
+                # POST /api/skills —— 新增/更新技能（admin）；编辑者只读
+                if me["role"] != "admin":
+                    return self._json(403, {"error": "只有 admin 能维护技能注册表"})
+                r = ai.skill_save(body.get("name"), body.get("use_when", ""),
+                                  body.get("how", ""), tools=body.get("tools"),
+                                  roles=body.get("roles"),
+                                  enabled=1 if body.get("enabled", True) else 0, by=user)
+                if not r.get("ok"):
+                    return self._json(422, r)
+                return self._json(200, r)
+
+            if parts[1:3] == ["memory", "decisions"]:
+                # POST /api/memory/decisions {slot?} —— 编辑者的经验清单（P1-1）
+                if me["role"] not in ("admin", "editor"):
+                    return self._json(403, {"error": "经验层只对 admin/editor 开放"})
+                return self._json(200, {"decisions": memory.decision_list(body.get("slot")),
+                                        "note": "这些经验只注入编辑者，不注入最终回答"})
 
             if parts[1:3] == ["harness", "snapshot"]:
                 # POST /api/harness/snapshot {note?} —— 给当前磁盘配置记一版

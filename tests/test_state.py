@@ -60,8 +60,8 @@ def test_role_denial():
 
 
 def test_requires_confirm():
-    """requires_confirm=True：工具不执行，落 pending 步骤。"""
-    ai.SPEC["tool_policies"]["search_docs"]["requires_confirm"] = True
+    """write/dangerous 类动作在 default 模式下：不执行，落 pending 步骤。"""
+    ai.SPEC["tool_policies"]["search_docs"]["class"] = "write"
     try:
         def fake_llm(messages, user="system"):
             return json.dumps({"tool": "search_docs", "args": {"q": "部署"}}), "stub"
@@ -73,7 +73,7 @@ def test_requires_confirm():
         t = ai.task_get(r["task_id"])
         assert any(s["kind"] == "pending" for s in t["steps"]), "pending 应落库"
     finally:
-        ai.SPEC["tool_policies"]["search_docs"]["requires_confirm"] = False
+        ai.SPEC["tool_policies"]["search_docs"]["class"] = "read"
 
 
 def test_resume_and_evidence():

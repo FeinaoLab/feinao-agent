@@ -52,12 +52,64 @@ def init_memory_db():
         confidence REAL DEFAULT 0.6,
         status TEXT DEFAULT 'pending',
         created TEXT, decided TEXT, decided_by TEXT,
-        hits INT DEFAULT 0, last_used TEXT
-    );
+        hits INT DEFAULT 0, last_used TEXT,
+        slot TEXT);
     CREATE INDEX IF NOT EXISTS idx_memory_user ON memory(user, status);
+    CREATE INDEX IF NOT EXISTS idx_memory_slot ON memory(kind, slot);
     """)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(memory)")]
+    if "slot" not in cols:
+        conn.execute("ALTER TABLE memory ADD COLUMN slot TEXT")
     conn.commit()
     conn.close()
+    return
+
+
+# ---------------- 经验层（P1-1：harness 级递归的最小实现） ----------------
+#
+# kind=decision 的记忆：记的是"哪类改法在哪类任务上产生了什么效果"。
+# 它只注入给编辑者（改配置/提补丁的人或 agent），不注入给最终回答——
+# 答案该由知识库与数据说话，不该被调参历史污染。
+
+def decision_write(slot, text, by="system", confidence=0.9):
+    """写一条改进经验。slot 形如 harness:bench:rag / harness:pilots.rag_topk。
+
+    同 slot 同文本幂等跳过；同 slot 不同文本直接追加（经验是积累，不是覆盖）。"""
+    init_memory_db()
+    text = (text or "").strip()
+    if not text:
+        return None
+    conn = ai.db()
+    row = conn.execute(
+        "SELECT id FROM memory WHERE kind='decision' AND slot=? AND text=?",
+        (slot, text)).fetchone()
+    if row:
+        conn.close()
+        return row["id"]
+    cur = conn.execute(
+        "INSERT INTO memory(user,kind,text,confidence,status,created,decided,decided_by,slot) "
+        "VALUES('system','decision',?,?, 'active', ?, ?, ?, ?)",
+        (text[:600], confidence, _now(), _now(), by, slot[:120]))
+    conn.commit()
+    mid = cur.lastrowid
+    conn.close()
+    return mid
+
+
+def decision_list(slot_prefix=None, limit=20):
+    """编辑者的经验清单：按 slot 前缀过滤，新的在前。"""
+    init_memory_db()
+    sql = "SELECT id,slot,text,created FROM memory WHERE kind='decision' AND status='active'"
+    args = []
+    if slot_prefix:
+        sql += " AND slot LIKE ?"
+        args.append(slot_prefix.rstrip("*") + "%")
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(limit)
+    conn = ai.db()
+    rows = [dict(r) for r in conn.execute(sql, args)]
+    conn.close()
+    return rows
 
 
 def _now():

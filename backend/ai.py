@@ -166,7 +166,7 @@ for _u in list(SPEC["users"]):
         SPEC["users"][_u] = _v
 
 # 出厂口令，只用于本地演示；对外暴露前必须替换。
-DEFAULT_PASSWORDS = {"admin123", "ops123456", "view123456"}
+DEFAULT_PASSWORDS = {"admin123", "ops123456", "view123456", "edit123456"}
 
 
 def db():
@@ -201,13 +201,29 @@ def init_db():
     CREATE TABLE IF NOT EXISTS harness_rev(
         id INTEGER PRIMARY KEY AUTOINCREMENT, sha TEXT, content TEXT, note TEXT,
         by TEXT, created TEXT, active INT DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS skills(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, use_when TEXT, how TEXT,
+        tools TEXT, roles TEXT DEFAULT 'admin,ops,viewer,editor',
+        enabled INT DEFAULT 1, created TEXT);
     """)
     for u, p in SPEC["users"].items():
-        conn.execute("INSERT OR IGNORE INTO users VALUES(?,?,?)",
-                     (u, p, "admin" if u == "admin" else ("ops" if u.startswith("ops") else "viewer")))
+        if u == "admin":
+            role = "admin"
+        elif u.startswith("ops"):
+            role = "ops"
+        elif u.startswith("editor"):
+            role = "editor"
+        else:
+            role = "viewer"
+        conn.execute("INSERT OR IGNORE INTO users VALUES(?,?,?)", (u, p, role))
+    for t, c, ddl in (("tasks", "mode", "TEXT"),):
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(%s)" % t)]
+        if c not in cols:
+            conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (t, c, ddl))
     conn.commit()
     conn.close()
     _ensure_fts()
+    skill_seed()
     harness_snapshot(note="启动快照")  # 每次起服记一版，内容没变则幂等跳过
 
 
@@ -323,6 +339,13 @@ def modes_policy():
             "yolo_allowed_roles": m.get("yolo_allowed_roles") or []}
 
 
+def mode_action(cls, mode):
+    """会话模式 × 工具等级 → 动作：allow / confirm / suspend / deny。
+
+    未知模式或未知组合一律按最保守的 confirm 处理：宁可多问人，不可少问。"""
+    return ((modes_policy()["definitions"].get(mode) or {}).get(cls)) or "confirm"
+
+
 def limits_policy():
     l = SPEC.get("limits") or {}
     return {"max_steps": int(l.get("max_steps", DEFAULT_LIMITS["max_steps"])),
@@ -390,6 +413,85 @@ def policy_check(name, user, used_counts):
     if not ok:
         return False, reason
     return policy_budget_ok(name, used_counts)
+
+
+# ---------------- 技能注册表（P1-3：加能力不改代码） ----------------
+
+SKILL_SEEDS = [
+    ("检索知识库", "问题涉及制度、标准、流程、文档等知识性内容",
+     "先调 search_docs 拿回相关文档再作答，回答里说明依据了哪些文档", ["search_docs"]),
+    ("查业务数据", "问题涉及订单、库存、设备等业务系统里的数字",
+     "用 query_system 指定 system 和 entity 查数，先报条数再报要点", ["query_system"]),
+    ("写入知识库", "需要把结论或资料沉淀成文档",
+     "调 ingest_doc（写操作，会挂审批单），标题写清主题再写正文", ["ingest_doc"]),
+]
+
+
+def skill_seed():
+    """幂等播种：出厂技能只补缺，不覆盖人工改过的说明。"""
+    conn = db()
+    n = 0
+    for name, use_when, how, tools in SKILL_SEEDS:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO skills(name,use_when,how,tools,created) VALUES(?,?,?,?,?)",
+            (name, use_when, how, json.dumps(tools), _now()))
+        n += cur.rowcount
+    conn.commit()
+    conn.close()
+    return n
+
+
+def skills_list(enabled_only=True):
+    sql = "SELECT * FROM skills" + (" WHERE enabled=1" if enabled_only else "") + " ORDER BY id"
+    conn = db()
+    rows = []
+    for r in conn.execute(sql):
+        d = dict(r)
+        try:
+            d["tools"] = json.loads(d.get("tools") or "[]")
+        except Exception:
+            d["tools"] = []
+        rows.append(d)
+    conn.close()
+    return rows
+
+
+def skill_save(name, use_when, how, tools=None, roles=None, enabled=1, by="admin"):
+    """新增或更新一条技能。工具名必须是注册表里真实存在的，否则拒绝。"""
+    name = (name or "").strip()
+    if not name:
+        return {"ok": False, "error": "name 必填"}
+    tools = [t for t in (tools or []) if t in TOOLS]
+    if not tools:
+        return {"ok": False,
+                "error": "tools 至少要有一个已注册工具（可选：%s）" % ",".join(TOOLS)}
+    conn = db()
+    conn.execute(
+        "INSERT INTO skills(name,use_when,how,tools,roles,enabled,created) VALUES(?,?,?,?,?,?,?) "
+        "ON CONFLICT(name) DO UPDATE SET use_when=excluded.use_when, how=excluded.how, "
+        "tools=excluded.tools, roles=excluded.roles, enabled=excluded.enabled",
+        (name, (use_when or "")[:300], (how or "")[:600], json.dumps(tools),
+         (roles or "admin,ops,viewer,editor")[:120], 1 if enabled else 0, _now()))
+    conn.commit()
+    conn.close()
+    audit_log(by, "skill_save", {"name": name, "tools": tools}, "ok", True)
+    return {"ok": True, "name": name, "tools": tools}
+
+
+def skill_match(q, top=2):
+    """按关键词重叠挑最相关的技能（复用 RAG 的分词），给 ReAct 的系统提示注入。"""
+    kws = set(_keywords(q, 20))
+    if not kws:
+        return []
+    scored = []
+    for s in skills_list():
+        text = "%s %s %s" % (s["name"], s["use_when"], s["how"])
+        skws = set(_keywords(text, 40))
+        hit = len(kws & skws)
+        if hit:
+            scored.append((hit, s))
+    scored.sort(key=lambda x: -x[0])
+    return [s for _, s in scored[:top]]
 
 
 # ---------------- 审批工作台（Permission 层的真闸门） ----------------
@@ -506,7 +608,16 @@ def approval_decide(aid, decision, by, note=""):
         return False, "审批单状态为 %s，不可重复处理" % (approval_get(aid) or {}).get("status"), row
     audit_log(by, "approval_" + decision, {"id": aid, "tool": row["tool"], "requester": row["user"]},
               (note or "")[:200], decision == "approved")
-    return True, ("已放行" if decision == "approved" else "已拒绝"), approval_get(aid)
+    extra = ""
+    # 补丁类审批：放行即激活。编辑者只能产出修订，生效权始终在审批人手里。
+    if decision == "approved" and row["tool"] == "harness.activate":
+        try:
+            rid = (row.get("args") or {}).get("rev_id")
+            r = harness_activate(rid, by=by)
+            extra = "；修订 #%s 已%s" % (rid, "激活" if r.get("ok") else "激活失败：%s" % r.get("error"))
+        except Exception as e:
+            extra = "；激活异常：%s" % str(e)[:120]
+    return True, (("已放行" if decision == "approved" else "已拒绝") + extra), approval_get(aid)
 
 
 def _task_used_counts(task_id):
@@ -808,6 +919,71 @@ def harness_activate(rid, by="admin"):
     audit_log(by, "harness_activate", {"id": rid, "sha": row["sha"]}, "ok", True)
     return {"ok": True, "active": rid, "sha": row["sha"],
             "note": "已激活修订 #%d（sha %s），内存配置已热加载" % (rid, row["sha"])}
+
+
+# 编辑者补丁不可触碰的键：这些是安全边界本身，边界不能自己改自己
+PATCH_FORBIDDEN_PREFIXES = ("tool_policies", "approval", "modes", "limits",
+                            "egress", "users", "providers", "upstreams")
+
+
+def harness_patch(patch, note="", by="editor"):
+    """编辑者提交配置补丁：只落一条 active=0 的修订 + 一张审批单，不改生效配置。
+
+    审批人放行（approvals/decide approved）时才会真正激活；拒绝则修订留在历史里可查不可用。
+    安全面（tool_policies/approval/modes/limits/egress/账号/上游）不在可补丁范围——
+    "guardrail 写在可编辑文件里不算安全边界"，那我们就让 guardrail 不可被补丁编辑。"""
+    role = user_role(by)
+    if role not in ("editor", "admin"):
+        return {"ok": False, "error": "角色 %s 无权提交补丁（限 editor/admin）" % role}
+    if not isinstance(patch, list) or not patch:
+        return {"ok": False, "error": "patch 必须是非空数组 [{path, value}]"}
+    for p in patch:
+        path = str(p.get("path") or "")
+        if not path:
+            return {"ok": False, "error": "补丁缺 path"}
+        if any(path == pre or path.startswith(pre + ".") for pre in PATCH_FORBIDDEN_PREFIXES):
+            return {"ok": False, "error": "%s 属于安全边界，不可被补丁修改（可改：pilots 等）" % path}
+    import copy
+    cand = copy.deepcopy(dict(SPEC))
+    for p in patch:
+        node = cand
+        keys = str(p["path"]).split(".")
+        for k in keys[:-1]:
+            if not isinstance(node, dict) or k not in node:
+                return {"ok": False, "error": "路径不存在：%s" % p["path"]}
+            node = node[k]
+        if not isinstance(node, dict) or keys[-1] not in node:
+            return {"ok": False, "error": "路径不存在：%s" % p["path"]}
+        node[keys[-1]] = p["value"]
+    try:
+        text = json.dumps(cand, ensure_ascii=False, indent=2) + "\n"
+        load_spec_text(text, "补丁预检")  # 只验不装：坏配置在提交时就打回
+    except SpecError as e:
+        return {"ok": False, "error": "补丁会产生非法配置：%s" % str(e)[:160]}
+    conn = db()
+    sha = spec_sha(text)
+    row = conn.execute("SELECT * FROM harness_rev WHERE sha=?", (sha,)).fetchone()
+    if row and row["active"]:
+        conn.close()
+        return {"ok": False, "error": "补丁与当前生效配置相同，无需提交"}
+    conn.execute("UPDATE harness_rev SET active=0 WHERE sha=?", (sha,))
+    cur = conn.execute(
+        "INSERT INTO harness_rev(sha,content,note,by,created,active) VALUES(?,?,?,?,?,0)",
+        (sha, text, "[补丁] %s" % (note or "无备注"), by, _now()))
+    rid = cur.lastrowid
+    acur = conn.execute(
+        "INSERT INTO approvals(task_id,step_idx,user,tool,args,reason,status,consumed,created) "
+        "VALUES(NULL,0,?, 'harness.activate', ?, ?, 'pending', 0, ?)",
+        (by, json.dumps({"rev_id": rid}),
+         "编辑者补丁待审：%s（改动 %s）" % ((note or "无备注")[:160],
+                                           ",".join(str(p.get("path")) for p in patch))[:300], _now()))
+    aid = acur.lastrowid
+    conn.commit()
+    conn.close()
+    audit_log(by, "harness_patch", {"rev": rid, "paths": [p.get("path") for p in patch]},
+              "待审批 #%d" % aid, True)
+    return {"ok": True, "rev_id": rid, "approval_id": aid, "sha": sha,
+            "note": "补丁已落为修订 #%d（未生效），审批单 #%d 已挂出；放行后才会激活" % (rid, aid)}
 
 
 # ---------------- LLM 网关（多供应商 + combo 降级链） ----------------
@@ -1216,6 +1392,9 @@ def pilot_nl2api(q, system="bi", user="admin"):
     ], user)
     result = {"system": system, "entity": ent_key, "rows": len(rows),
               "sample": rows[:5], "summary": summary, "provider": provider}
+    eid = evidence_log(user, "nl2api", None, q, summary, provider,
+                       sources=[{"system": system, "entity": ent_key, "rows": len(rows)}])
+    result["evidence_id"] = eid
     audit_log(user, "pilot_nl2api", {"q": q, "system": system, "entity": ent_key}, summary[:200], True)
     return result
 
@@ -1229,8 +1408,11 @@ def pilot_script(scenario, tone="专业友好", user="admin"):
         {"role": "system", "content": "你是资深客服培训师。按【开场】【承接】【方案】【促单】【收尾】五段生成话术，语气：%s。可参考知识库：\n%s [PILOT:script]" % (tone, ctx)},
         {"role": "user", "content": scenario},
     ], user)
+    refs = [h["title"] for h in hits]
+    eid = evidence_log(user, "script", None, scenario, ans, provider,
+                       sources=[{"title": t} for t in refs])
     audit_log(user, "pilot_script", {"scenario": scenario, "tone": tone}, ans[:200], True)
-    return {"script": ans, "provider": provider, "refs": [h["title"] for h in hits]}
+    return {"script": ans, "provider": provider, "refs": refs, "evidence_id": eid}
 
 
 # ---------------- L2：轻量 ReAct（工具注册表） ----------------
@@ -1249,11 +1431,11 @@ TOOLS = {
 
 # ---------------- State 层：任务进度落库（Harness 第 2 层） ----------------
 
-def task_create(user, goal):
+def task_create(user, goal, mode=None):
     conn = db()
-    cur = conn.execute("INSERT INTO tasks(user,goal,status,created,updated) VALUES(?,?, 'active',?,?)",
+    cur = conn.execute("INSERT INTO tasks(user,goal,status,created,updated,mode) VALUES(?,?, 'active',?,?,?)",
                        (user, goal[:300], time.strftime("%Y-%m-%dT%H:%M:%S"),
-                        time.strftime("%Y-%m-%dT%H:%M:%S")))
+                        time.strftime("%Y-%m-%dT%H:%M:%S"), mode))
     conn.commit()
     tid = cur.lastrowid
     conn.close()
@@ -1306,10 +1488,16 @@ def task_list(user=None, limit=30):
     return rows
 
 
-def _react_system_prompt(trace):
+def _react_system_prompt(trace, q=""):
+    skills = skill_match(q) if q else []
+    skill_txt = ""
+    if skills:
+        skill_txt = " 相关技能：%s。" % "; ".join(
+            "%s（%s：用 %s）" % (s["name"], s["use_when"], "/".join(s["tools"])) for s in skills)
     return ("你是飞脑Agent。可用工具：%s。如需工具，输出JSON：{\"tool\":\"名称\",\"args\":{...}}；"
             "若可回答，直接输出答案并遵守：%s [PILOT:react]"
-            % (json.dumps({k: v["desc"] for k, v in TOOLS.items()}, ensure_ascii=False), VERIFY_TAIL))
+            % (json.dumps({k: v["desc"] for k, v in TOOLS.items()}, ensure_ascii=False),
+               VERIFY_TAIL + skill_txt))
 
 
 def _abort_text(reason, d, task_id):
@@ -1342,14 +1530,19 @@ def _abort_run(task_id, user, task, reason, detail, trace, provider, idx):
             "provider": provider, "evidence_id": eid}
 
 
-def react_run(task, user="admin", task_id=None, max_steps=None):
+def react_run(task, user="admin", task_id=None, max_steps=None, mode=None):
     """ReAct 多步任务：每一步落 task_steps（State 层），工具调用过动作级权限/预算
     （Permission 层），结束后把证据落 evidence 表（Verification 层）。
 
     task_id 传入且该任务属于此用户且状态 active 时，从上次的步骤继续跑（断点续跑）。
     三条卡死上限来自 spec.limits：墙钟、三连相同调用、连续畸形输出——只增加判断，不改循环结构。
-    """
+    mode 是会话模式（plan/default/auto/yolo），决定写/危险动作是放行、挂审还是拒绝；
+    不传则取任务上记录的模式，再不济取 spec.modes.default。"""
     lim = limits_policy()
+    mp = modes_policy()
+    mode = (mode or "").strip() or None
+    if mode and mode not in mp["definitions"]:
+        return {"error": "未知模式 %s（可选：%s）" % (mode, "/".join(mp["definitions"]))}
     # spec.limits.max_steps 是硬上限，pilots.react_max_steps 是常规步数：取小的那个
     max_steps = min(int(max_steps or SPEC["pilots"]["react_max_steps"]), lim["max_steps"])
     trace = []
@@ -1373,9 +1566,14 @@ def react_run(task, user="admin", task_id=None, max_steps=None):
                     used_counts[c["tool"]] = used_counts.get(c["tool"], 0) + 1
                 except Exception:
                     pass
+        mode = mode or t.get("mode") or mp["default"]
     else:
-        task_id = task_create(user, task)
+        mode = mode or mp["default"]
         idx = 0
+        task_id = task_create(user, task, mode=mode)
+    if mode == "yolo" and user_role(user) not in (mp["yolo_allowed_roles"] or []):
+        return {"error": "模式 yolo 仅限 %s 使用（当前角色无权）"
+                         % (",".join(mp["yolo_allowed_roles"]) or "指定角色")}
 
     provider = "-"
     answer = None
@@ -1387,7 +1585,7 @@ def react_run(task, user="admin", task_id=None, max_steps=None):
                               {"elapsed": round(spent, 1), "limit": lim["max_wall_clock_seconds"]},
                               trace, provider, idx)
         raw, provider = llm_chat([
-            {"role": "system", "content": _react_system_prompt(trace)},
+            {"role": "system", "content": _react_system_prompt(trace, task)},
             {"role": "user", "content": "任务：%s\n已执行：%s" % (task, json.dumps(trace, ensure_ascii=False)[:1500])},
         ], user)
         m = re.search(r"\{.*\}", raw, re.S)
@@ -1427,8 +1625,9 @@ def react_run(task, user="admin", task_id=None, max_steps=None):
                 idx += 1
                 continue
             pol = tool_policy(call["tool"])
-            if pol["requires_confirm"]:
-                # 同一动作此前已被审批人拒绝 → 直接拒，不再重复挂单（不打扰人）
+            # 模式决定写/危险动作走哪条路：allow 直接执行，deny 拒绝，confirm/suspend 挂审批。
+            # 但人工已经拒过的动作在哪个模式都保持拒绝——人的"不"不因模式被绕过。
+            if pol["class"] in ("write", "dangerous"):
                 rej = _rejected_before(task_id, call["tool"], call.get("args", {}))
                 if rej:
                     entry = {"tool": call["tool"], "args": call.get("args", {}),
@@ -1438,6 +1637,15 @@ def react_run(task, user="admin", task_id=None, max_steps=None):
                     task_step(task_id, idx, "denied", json.dumps(entry, ensure_ascii=False))
                     idx += 1
                     continue
+            act = mode_action(pol["class"], mode)
+            if act == "deny":
+                entry = {"tool": call["tool"], "args": call.get("args", {}),
+                         "denied": "会话模式 %s 下不允许 %s 类动作" % (mode, pol["class"])}
+                trace.append(entry)
+                task_step(task_id, idx, "denied", json.dumps(entry, ensure_ascii=False))
+                idx += 1
+                continue
+            if act in ("confirm", "suspend"):
                 # 写操作：先看同一动作是否已放行执行过（幂等回放，不算新调用），否则挂起等人工审批
                 prev = _prev_result(task_id, call["tool"], call.get("args", {}))
                 if prev is not None:
