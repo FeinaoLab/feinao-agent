@@ -66,3 +66,8 @@ th{background:#f8fafc;color:#64748b}
 .apv-act .go{background:#16a34a;color:#fff}
 .apv-act .no{background:#fee2e2;color:#991b1b}
 .apv-act button[disabled]{opacity:.6;cursor:default}
+.mem-x{margin-left:auto;background:#0ea5e9!important;border-color:#0ea5e9!important;color:#fff!important;font-weight:600}
+.mem-card{border-left-color:#0ea5e9}
+.mem-card .apv-h b{font-weight:600;color:#0f172a}
+.mem-note,.mem-note2{font-size:12px;color:#64748b;line-height:1.7;margin-top:8px}
+.mem-note2{margin-top:0}

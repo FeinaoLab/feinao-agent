@@ -32,6 +32,13 @@
     "allow_self": true,
     "ttl_minutes": 1440
   },
+  "memory": {
+    "name": "飞忆·跨会话长期记忆",
+    "inject_topk": 3,
+    "min_score": 1,
+    "auto_activate_min": 1.0,
+    "max_text": 140
+  },
   "tool_policies": {
     "search_docs": {"max_calls_per_run": 3, "roles": ["admin", "ops", "viewer"], "requires_confirm": false},
     "query_system": {"max_calls_per_run": 2, "roles": ["admin", "ops"], "requires_confirm": false},

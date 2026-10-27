@@ -128,6 +128,32 @@ def test_full():
         row = next(r for r in j["rows"] if r["id"] == eid)
         assert row["channel"] == "lcm" and "context_tokens" in row and "sources" in row, "证据字段不全"
 
+        # 飞忆：抽取 → 待确认 → 放行 → 新会话凭记忆命中
+        # 端口号每轮不同：保证抽取不被上一轮的库内容去重掉（测试可重复跑）
+        port = 8100 + int(time.time()) % 800
+        st, j = req("/api/chat", "POST",
+                    {"text": "我们定下来：部署端口统一 %d，审批只允许 admin 放行。" % port}, tok)
+        mconv = j["conv_id"]
+        st, j = req("/api/memory/extract", "POST", {"conv_id": mconv}, tok)
+        assert st == 200 and j.get("created", 0) >= 1, "记忆抽取 fail：%s" % j
+        st, j = req("/api/memory?status=pending", token=tok)
+        assert st == 200 and j["rows"] and "counts" in j, "记忆列表 fail"
+        row = next((r for r in j["rows"] if str(port) in r["text"]), None)
+        assert row and row["status"] == "pending", "抽取结果必须先待在待确认区：%s" % j["rows"][:2]
+        mid = row["id"]
+        st, j = req("/api/memory/decide", "POST", {"id": mid, "action": "activate"}, tok)
+        assert st == 200 and j["status"] == "active", "记忆放行 fail"
+        st, j = req("/api/memory?status=active", token=tok)
+        assert any(r["id"] == mid for r in j["rows"]), "生效后应在 active 列表"
+        # 全新会话（无历史）问这个端口：应命中记忆并回报编号
+        st, j = req("/api/chat", "POST", {"text": "端口 %d 是谁定的？" % port}, tok)
+        assert st == 200 and mid in (j.get("memory_ids") or []), \
+            "新会话应命中跨会话记忆：%s" % j.get("memory_ids")
+        st, j = req("/api/memory/decide", "POST", {"id": 999999, "action": "delete"}, tok)
+        assert st == 404, "不存在的记忆应 404"
+        st, j = req("/api/memory/decide", "POST", {"id": mid, "action": "bogus"}, tok)
+        assert st == 422, "非法 action 应 422"
+
         # 续跑入口：done 任务应被拒绝（422/错误信息）
         st, j = req("/api/ai/react", "POST", {"task": "", "task_id": task_id}, tok)
         assert st == 200 and "error" in j, "done 任务不应可续跑"

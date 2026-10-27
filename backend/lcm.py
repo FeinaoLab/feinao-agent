@@ -16,6 +16,7 @@ import sqlite3
 import time
 
 import ai
+import memory
 
 
 # ---------------- token 估算（中文按字、英文按词，够用即可） ----------------
@@ -51,6 +52,7 @@ def init_lcm_db():
     """)
     conn.commit()
     conn.close()
+    memory.init_memory_db()      # 飞忆：跨会话长期记忆（另一层，幂等建表）
 
 
 # ---------------- 核心对象 ----------------
@@ -257,13 +259,22 @@ class LCM:
 
     # -------- 一问一答（端到端） --------
 
-    def ask(self, q, keep_recent=8, budget=1200, use_detail=True):
-        """用户提问 → 摘要+热区 → 回溯原文 → 调模型 → 落库回答。
-        回溯是常态动作（摘要必然有损），不是补救措施。"""
+    def ask(self, q, keep_recent=8, budget=1200, use_detail=True, use_memory=True):
+        """用户提问 → 摘要+热区 → 回溯原文 → 跨会话记忆 → 调模型 → 落库回答。
+        回溯是常态动作（摘要必然有损），不是补救措施。
+        记忆只读注入：命中不到就不注入，不占预算、不诱导编造。"""
         self.turn(q)
         sys_prompt = ("你是飞脑长期会话助手。下面给你的是本会话的历史摘要、最近对话，"
                       "以及按问题回溯到的原文片段；请依据这些信息作答，"
                       "没有的信息明确说不知道，不要编。" + ai.VERIFY_TAIL + " [PILOT:lcm]")
+        mem_block, mem_ids = ("", [])
+        if use_memory:
+            try:
+                mem_block, mem_ids = memory.build_context(self.user, q, conv_id=self.conv_id)
+            except Exception:
+                mem_block, mem_ids = "", []
+        if mem_block:
+            sys_prompt += "\n" + mem_block
         ctx = self.build_context(keep_recent=keep_recent, budget=budget, system=sys_prompt)
         detail = self.retrieve(q, 3, exclude_seq=self._seq) if use_detail else []
         if detail:
@@ -274,16 +285,17 @@ class LCM:
         self.append("assistant", ans)
         ai.audit_log(self.user, "lcm_ask",
                      {"conv": self.conv_id, "q": q, "ctx_tokens": msgs_tokens(ctx),
-                      "detail": [d["seq"] for d in detail]}, ans[:200], True)
+                      "detail": [d["seq"] for d in detail], "memory": mem_ids}, ans[:200], True)
         eid = ai.evidence_log(self.user, "lcm", self.conv_id, q, ans, provider,
                               sources=[{"seq": d["seq"], "role": d["role"]} for d in detail],
                               trace={"summaries": ctx[0]["content"].count("[历史摘要") if ctx and ctx[0]["role"] == "system" else 0,
-                                     "turns": self._seq},
+                                     "turns": self._seq, "memory": mem_ids},
                               context_tokens=msgs_tokens(ctx))
         return {"answer": ans, "provider": provider, "conv_id": self.conv_id,
                 "context_tokens": msgs_tokens(ctx),
                 "summaries": ctx[0]["content"].count("[历史摘要") if ctx and ctx[0]["role"] == "system" else 0,
                 "detail_back": [d["seq"] for d in detail],
+                "memory_ids": mem_ids,
                 "evidence_id": eid}
 
 

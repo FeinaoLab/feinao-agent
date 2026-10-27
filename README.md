@@ -17,6 +17,7 @@
 - **动作级权限/预算（v1.3）**：`spec.json` 的 `tool_policies` 按动作声明 `roles` / `max_calls_per_run` / `requires_confirm`，ReAct 强制执行；拒绝不静默，原因喂回模型并落 `denied` 步骤
 - **任务进度落库（v1.3）**：`tasks` + `task_steps`（tool_call / tool_result / denied / pending / error / answer / replay），步数耗尽保持 `active` 可 `task_id` 断点续跑；接口 `GET /api/tasks`、`GET /api/tasks/detail?id=N`
 - **飞审审批工作台（v1.4）**：`requires_confirm` 的真闸门——写操作自动挂审批单（工具/参数/发起人/任务目标），人工「放行并执行」后系统真执行该动作并让任务自动续跑，拒绝则动作不执行、理由回给模型；重复提交防扰 + 幂等回放；接口 `GET /api/approvals`、`POST /api/approvals/decide`（详见 `docs/飞审审批工作台-上线说明.md`）
+- **飞忆跨会话长期记忆（v1.5）**：Harness 第 1 层收口——从会话抽取事实/决定/偏好/产出物，默认待确认、人工点头才生效；新会话按关键词检索注入（带 M#编号/日期/来源会话），命中不到不注入；三道过滤（反虚构 grounding、过程噪声、去重+新值取代旧值）；接口 `GET /api/memory`、`POST /api/memory/decide`、`POST /api/memory/extract`（详见 `docs/飞忆跨会话记忆-上线说明.md`）
 - **审计与配额**：全工具/LLM 调用写 audit；viewer 无审计权限
 
 ## 运行

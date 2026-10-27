@@ -17,6 +17,7 @@ MOBILE = os.path.abspath(os.path.join(BASE, "..", "mobile"))
 
 import ai  # noqa: E402
 import lcm  # noqa: E402
+import memory  # noqa: E402
 import json as _json
 
 SPEC = ai.SPEC
@@ -132,6 +133,8 @@ class Handler(BaseHTTPRequestHandler):
                     "知识文档": conn.execute("SELECT COUNT(*) c FROM docs").fetchone()["c"],
                     "任务": conn.execute("SELECT COUNT(*) c FROM tasks").fetchone()["c"],
                     "证据": conn.execute("SELECT COUNT(*) c FROM evidence").fetchone()["c"],
+                    "记忆": conn.execute("SELECT COUNT(*) c FROM memory WHERE status='active'").fetchone()["c"],
+                    "待确认记忆": conn.execute("SELECT COUNT(*) c FROM memory WHERE status='pending'").fetchone()["c"],
                     "待审批": conn.execute(
                         "SELECT COUNT(*) c FROM approvals WHERE status='pending'").fetchone()["c"],
                 }
@@ -216,6 +219,18 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(401, {"error": "请先登录"})
                 cid = int((qs.get("conv_id") or ["0"])[0]) or None
                 return self._json(200, {"rows": ai.evidence_list(user=me["user"], conv_id=cid)})
+            if len(parts) == 2 and parts[1] == "memory":
+                # GET /api/memory?status=pending|active|disabled|all —— 飞忆（跨会话长期记忆）
+                me = _auth(self)
+                if not me:
+                    return self._json(401, {"error": "请先登录"})
+                status = (qs.get("status") or ["pending"])[0]
+                rows = memory.list_items(me["user"], status=status)
+                pol = memory.policy()
+                return self._json(200, {"rows": rows, "brand": pol["name"],
+                                        "counts": memory.counts(me["user"]),
+                                        "my_role": ai.user_role(me["user"]),
+                                        "inject_topk": pol["inject_topk"]})
             if len(parts) == 2 and parts[1] == "lcm":
                 # GET /api/lcm?conv_id=N —— 会话的库结构统计与摘要节点（DAG 视图）
                 me = _auth(self)
@@ -300,6 +315,27 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         code = 409
                     return self._json(code, r)
+                return self._json(200, r)
+
+            if parts[1:3] == ["memory", "decide"]:
+                # POST /api/memory/decide {id, action: activate|disable|delete}
+                mid = int(body.get("id") or 0)
+                action = body.get("action")
+                if not mid or action not in ("activate", "disable", "delete"):
+                    return self._json(422, {"error": "id / action(activate|disable|delete) 必填"})
+                r = memory.decide(mid, action, user)
+                if r.get("error"):
+                    code = 404 if "不存在" in r["error"] else 403
+                    return self._json(code, r)
+                return self._json(200, r)
+
+            if parts[1:3] == ["memory", "extract"]:
+                # POST /api/memory/extract {conv_id?} —— 从最近会话抽取候选记忆（默认进待确认区）
+                cid = body.get("conv_id")
+                r = memory.extract(user, conv_id=int(cid) if cid else None,
+                                   use_llm=bool(body.get("use_llm", True)))
+                if r.get("error"):
+                    return self._json(422, r)
                 return self._json(200, r)
 
             if parts[1:3] == ["chat"]:
@@ -387,6 +423,7 @@ class Handler(BaseHTTPRequestHandler):
 def run():
     ai.init_db()
     lcm.init_lcm_db()
+    memory.init_memory_db()
     port = int(os.environ.get("FEINAO_PORT", SPEC["brand"]["port"]))
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print("FeiNao %s on :%d" % (SPEC["brand"]["full"], port))

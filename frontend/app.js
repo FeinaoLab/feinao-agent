@@ -82,7 +82,8 @@ function chatView() {
         wait.textContent = d.answer;
         bubble('meta', '—— ' + d.provider + ' ｜ 上下文 ' + d.context_tokens + ' token' +
           (d.summaries ? ' ｜ 摘要 ' + d.summaries + ' 段' : '') +
-          (d.detail_back && d.detail_back.length ? ' ｜ 回溯原文 #' + d.detail_back.join('、') : ''));
+          (d.detail_back && d.detail_back.length ? ' ｜ 回溯原文 #' + d.detail_back.join('、') : '') +
+          (d.memory_ids && d.memory_ids.length ? ' ｜ 跨会话记忆 M#' + d.memory_ids.join('、M#') : ' ｜ 未命中跨会话记忆'));
         updateStat(d.stats);
         renderConvs();
       })
@@ -199,6 +200,98 @@ function approvalsView() {
   load();
 }
 
+var MEM = 'pending';
+
+function memoryView() {
+  var tabs = [['pending', '待确认'], ['active', '已生效'], ['disabled', '已停用'], ['all', '全部']];
+  $('#view').innerHTML = '<div class="apv">' +
+    '<div class="apv-title">飞忆 · 跨会话长期记忆</div>' +
+    '<div class="apv-bar"><b id="mem-n">加载中…</b><span id="mem-c"></span></div>' +
+    '<div class="apv-tabs" id="mem-tabs">' + tabs.map(function (t) {
+      return '<button data-s="' + t[0] + '"' + (t[0] === MEM ? ' class="on"' : '') + '>' + t[1] + '</button>';
+    }).join('') + '<button id="mem-x" class="mem-x">⤓ 从最近会话抽取</button></div>' +
+    '<div id="mem-list" class="apv-list">…</div>' +
+    '<div class="mem-note">记忆只作参考注入：本轮你明说的内容优先于旧记忆；命中不到就不注入，</div>' +
+    '<div class="mem-note2">所以问它没记过的事，它必须说不知道。每条都能停用或删除。</div></div>';
+
+  $('#mem-tabs').onclick = function (e) {
+    var b = e.target.closest('button[data-s]'); if (!b) return;
+    MEM = b.dataset.s;
+    document.querySelectorAll('#mem-tabs button[data-s]').forEach(function (x) {
+      x.classList.toggle('on', x.dataset.s === MEM);
+    });
+    load();
+  };
+
+  $('#mem-x').onclick = function () {
+    var btn = this; btn.disabled = true; btn.textContent = '抽取中…';
+    api('memory/extract', { method: 'POST', body: {} })
+      .then(function (d) {
+        btn.textContent = '⤓ 已抽 ' + d.created + ' 条（跳过重复 ' + d.skipped + '）';
+        MEM = 'pending';
+        document.querySelectorAll('#mem-tabs button[data-s]').forEach(function (x) {
+          x.classList.toggle('on', x.dataset.s === 'pending');
+        });
+        load();
+        setTimeout(function () { btn.disabled = false; btn.textContent = '⤓ 从最近会话抽取'; }, 2500);
+      })
+      .catch(function (m) {
+        btn.textContent = '抽取失败：' + m;
+        btn.disabled = false;
+      });
+  };
+
+  function load() {
+    api('memory?status=' + MEM).then(function (d) {
+      if (d.brand) { var t = document.querySelector('.apv-title'); if (t) t.textContent = d.brand; }
+      $('#mem-n').textContent = '待确认 ' + d.counts.pending + ' 条 ｜ 已生效 ' + d.counts.active + ' 条';
+      $('#mem-c').textContent = '注入上限 ' + d.inject_topk + ' 条/轮 ｜ 我的角色：' + d.my_role;
+      if (!d.rows.length) {
+        $('#mem-list').innerHTML = '<div class="apv-empty">还没有记忆。在对话里定过事之后，点右上角「从最近会话抽取」，' +
+          '抽出来的条目会先放在这里等你确认。</div>';
+        return;
+      }
+      $('#mem-list').innerHTML = d.rows.map(function (r) {
+        var kind = { fact: '事实', decision: '决定', preference: '偏好', artifact: '产出物' }[r.kind] || r.kind;
+        var tag = { pending: '待确认', active: '已生效', disabled: '已停用' }[r.status] || r.status;
+        var cls = { pending: '', active: 'ok', disabled: 'bad' }[r.status] || '';
+        var src = '来源：会话 #' + (r.src_conv || '-') + ' ｜ ' + String(r.src_time || r.created).slice(0, 16) +
+          ' ｜ 置信度 ' + r.confidence + ' ｜ 命中 ' + (r.hits || 0) + ' 次';
+        var btns = '';
+        if (r.status === 'pending') {
+          btns = '<div class="apv-act"><button class="go" data-id="' + r.id + '" data-a="activate">记住</button>' +
+            '<button class="no" data-id="' + r.id + '" data-a="delete">忽略</button></div>';
+        } else if (r.status === 'active') {
+          btns = '<div class="apv-act"><button class="no" data-id="' + r.id + '" data-a="disable">停用</button></div>';
+        } else {
+          btns = '<div class="apv-act"><button class="go" data-id="' + r.id + '" data-a="activate">启用</button>' +
+            '<button class="no" data-id="' + r.id + '" data-a="delete">删除</button></div>';
+        }
+        return '<div class="apv-card mem-card">' +
+          '<div class="apv-h"><b>M#' + r.id + ' ' + esc(r.text) + '</b><span class="tag ' + cls + '">' + tag + '</span></div>' +
+          '<div class="apv-kv">' + kind + ' ｜ ' + src + '</div>' +
+          '<div class="apv-out" id="mem-o' + r.id + '"></div>' + btns + '</div>';
+      }).join('');
+    }).catch(function (m) { $('#mem-list').textContent = '加载失败：' + m; });
+  }
+
+  $('#mem-list').onclick = function (e) {
+    var b = e.target.closest('button[data-id]'); if (!b) return;
+    var id = parseInt(b.dataset.id, 10), action = b.dataset.a;
+    b.disabled = true;
+    var out = $('#mem-o' + id);
+    if (out) out.textContent = '处理中…';
+    api('memory/decide', { method: 'POST', body: { id: id, action: action } })
+      .then(function () { load(); })
+      .catch(function (m) {
+        if (out) out.textContent = '操作失败：' + m;
+        b.disabled = false;
+      });
+  };
+
+  load();
+}
+
 function auditView() {
   $('#view').innerHTML = '<div class="kpis" id="kpis"></div><div id="tbl">加载中…</div>';
   api('dashboard').then(function (d) {
@@ -221,6 +314,7 @@ function render() {
   if (CUR === 'chat') chatView();
   else if (CUR === 'pilots') pilotsView();
   else if (CUR === 'approvals') approvalsView();
+  else if (CUR === 'memory') memoryView();
   else auditView();
 }
 
