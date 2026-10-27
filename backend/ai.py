@@ -64,6 +64,16 @@ def init_db():
     CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, user TEXT, tool TEXT, args TEXT, result TEXT, ok INT);
     CREATE TABLE IF NOT EXISTS usage(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, provider TEXT, model TEXT, ok INT, latency_ms INT, pt INT, ct INT);
     CREATE TABLE IF NOT EXISTS docs(id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, body TEXT, source TEXT, created TEXT);
+    CREATE TABLE IF NOT EXISTS evidence(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, conv_id INT, user TEXT,
+        channel TEXT, q TEXT, answer TEXT, provider TEXT,
+        sources TEXT, trace TEXT, context_tokens INT, unverified INT);
+    CREATE TABLE IF NOT EXISTS tasks(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user TEXT, goal TEXT,
+        status TEXT DEFAULT 'active', created TEXT, updated TEXT);
+    CREATE TABLE IF NOT EXISTS task_steps(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INT, idx INT,
+        kind TEXT, content TEXT, created TEXT);
     """)
     for u, p in SPEC["users"].items():
         conn.execute("INSERT OR IGNORE INTO users VALUES(?,?,?)",
@@ -92,6 +102,92 @@ def audit_log(user, tool, args, result, ok):
                   str(result)[:2000], 1 if ok else 0))
     conn.commit()
     conn.close()
+
+
+# ---------------- 证据链（Harness 第 5 层：验证必须是环境的，不是模型自述） ----------------
+
+def evidence_log(user, channel, conv_id, q, answer, provider, sources=None,
+                 trace=None, context_tokens=0):
+    """把一次回答的环境级证据落库：用了哪些来源、走了哪些动作、上下文多大。
+
+    环境级 = 由代码记录"实际发生了什么"（检索命中/工具调用/回溯轮次），
+    与模型嘴上说的"我完成了"互相独立，可事后审计比对。
+    返回 evidence_id。
+    """
+    unverified = 1 if "未验证" in (answer or "") else 0
+    conn = db()
+    cur = conn.execute(
+        "INSERT INTO evidence(ts,conv_id,user,channel,q,answer,provider,sources,trace,context_tokens,unverified) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (time.strftime("%Y-%m-%dT%H:%M:%S"), conv_id, user, channel,
+         (q or "")[:500], (answer or "")[:2000], provider,
+         json.dumps(sources or [], ensure_ascii=False)[:2000],
+         json.dumps(trace or [], ensure_ascii=False)[:4000],
+         int(context_tokens or 0), unverified))
+    conn.commit()
+    eid = cur.lastrowid
+    conn.close()
+    return eid
+
+
+def evidence_list(user=None, conv_id=None, limit=50):
+    conn = db()
+    sql = "SELECT id,ts,conv_id,user,channel,q,answer,provider,sources,trace,context_tokens,unverified FROM evidence"
+    where, args = [], []
+    if user:
+        where.append("user=?")
+        args.append(user)
+    if conv_id:
+        where.append("conv_id=?")
+        args.append(int(conv_id))
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(int(limit))
+    rows = []
+    for r in conn.execute(sql, args):
+        d = dict(r)
+        try:
+            d["sources"] = json.loads(d["sources"] or "[]")
+        except Exception:
+            d["sources"] = []
+        try:
+            d["trace"] = json.loads(d["trace"] or "[]")
+        except Exception:
+            d["trace"] = []
+        rows.append(d)
+    conn.close()
+    return rows
+
+
+def user_role(user):
+    conn = db()
+    row = conn.execute("SELECT role FROM users WHERE username=?", (user,)).fetchone()
+    conn.close()
+    return row["role"] if row else "viewer"
+
+
+# ---------------- 动作级权限/预算（Harness 第 4 层） ----------------
+
+def tool_policy(name):
+    """spec.json tool_policies 声明的动作级策略；未声明的工具走保守默认。"""
+    pol = (SPEC.get("tool_policies") or {}).get(name) or {}
+    return {
+        "max_calls_per_run": int(pol.get("max_calls_per_run", 2)),
+        "roles": pol.get("roles") or ["admin", "ops", "viewer"],
+        "requires_confirm": bool(pol.get("requires_confirm", False)),
+    }
+
+
+def policy_check(name, user, used_counts):
+    """返回 (ok, reason)。ok=False 时工具不执行。"""
+    pol = tool_policy(name)
+    role = user_role(user)
+    if role not in pol["roles"]:
+        return False, "角色 %s 无权调用 %s（允许：%s）" % (role, name, ",".join(pol["roles"]))
+    if used_counts.get(name, 0) >= pol["max_calls_per_run"]:
+        return False, "%s 已达单次任务预算上限 %d 次" % (name, pol["max_calls_per_run"])
+    return True, ""
 
 
 # ---------------- LLM 网关（多供应商 + combo 降级链） ----------------
@@ -353,7 +449,11 @@ def pilot_ask(q, user="admin"):
     ]
     ans, provider = llm_chat(messages, user)
     audit_log(user, "pilot_ask", {"q": q, "hits": len(hits)}, ans[:200], True)
-    return {"answer": ans, "provider": provider, "sources": [{"id": h["rowid"], "title": h["title"]} for h in hits]}
+    eid = evidence_log(user, "rag", None, q, ans, provider,
+                       sources=[{"id": h["rowid"], "title": h["title"]} for h in hits])
+    return {"answer": ans, "provider": provider,
+            "sources": [{"id": h["rowid"], "title": h["title"]} for h in hits],
+            "evidence_id": eid}
 
 
 # ---------------- 试点2：BI 自然语言查数（NL2API，非裸SQL，安全） ----------------
@@ -447,27 +547,158 @@ TOOLS = {
 }
 
 
-def react_run(task, user="admin"):
-    max_steps = SPEC["pilots"]["react_max_steps"]
+# ---------------- State 层：任务进度落库（Harness 第 2 层） ----------------
+
+def task_create(user, goal):
+    conn = db()
+    cur = conn.execute("INSERT INTO tasks(user,goal,status,created,updated) VALUES(?,?, 'active',?,?)",
+                       (user, goal[:300], time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        time.strftime("%Y-%m-%dT%H:%M:%S")))
+    conn.commit()
+    tid = cur.lastrowid
+    conn.close()
+    return tid
+
+
+def task_step(task_id, idx, kind, content):
+    conn = db()
+    conn.execute("INSERT INTO task_steps(task_id,idx,kind,content,created) VALUES(?,?,?,?,?)",
+                 (task_id, idx, kind, str(content)[:2000], time.strftime("%Y-%m-%dT%H:%M:%S")))
+    conn.execute("UPDATE tasks SET updated=? WHERE id=?",
+                 (time.strftime("%Y-%m-%dT%H:%M:%S"), task_id))
+    conn.commit()
+    conn.close()
+
+
+def task_finish(task_id, status):
+    conn = db()
+    conn.execute("UPDATE tasks SET status=?, updated=? WHERE id=?",
+                 (status, time.strftime("%Y-%m-%dT%H:%M:%S"), task_id))
+    conn.commit()
+    conn.close()
+
+
+def task_get(task_id, user=None):
+    conn = db()
+    row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+    steps = [dict(r) for r in conn.execute(
+        "SELECT idx,kind,content,created FROM task_steps WHERE task_id=? ORDER BY idx", (task_id,))]
+    conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    if user and d["user"] != user:
+        return None
+    d["steps"] = steps
+    return d
+
+
+def task_list(user=None, limit=30):
+    conn = db()
+    if user:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT id,goal,status,created,updated FROM tasks WHERE user=? ORDER BY id DESC LIMIT ?",
+            (user, limit))]
+    else:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT id,user,goal,status,created,updated FROM tasks ORDER BY id DESC LIMIT ?", (limit,))]
+    conn.close()
+    return rows
+
+
+def _react_system_prompt(trace):
+    return ("你是飞脑Agent。可用工具：%s。如需工具，输出JSON：{\"tool\":\"名称\",\"args\":{...}}；"
+            "若可回答，直接输出答案并遵守：%s [PILOT:react]"
+            % (json.dumps({k: v["desc"] for k, v in TOOLS.items()}, ensure_ascii=False), VERIFY_TAIL))
+
+
+def react_run(task, user="admin", task_id=None, max_steps=None):
+    """ReAct 多步任务：每一步落 task_steps（State 层），工具调用过动作级权限/预算
+    （Permission 层），结束后把证据落 evidence 表（Verification 层）。
+
+    task_id 传入且该任务属于此用户且状态 active 时，从上次的步骤继续跑（断点续跑）。
+    """
+    max_steps = max_steps or SPEC["pilots"]["react_max_steps"]
     trace = []
+    used_counts = {}
+    if task_id:
+        t = task_get(task_id, user)
+        if not t:
+            return {"error": "任务不存在或不属于当前用户"}
+        if t["status"] != "active":
+            return {"error": "任务状态为 %s，仅 active 任务可续跑" % t["status"]}
+        for s in t["steps"]:
+            if s["kind"] in ("tool_call", "tool_result", "error"):
+                trace.append(json.loads(s["content"]))
+        idx = (t["steps"][-1]["idx"] + 1) if t["steps"] else 0
+        for s in t["steps"]:
+            if s["kind"] == "tool_call":
+                try:
+                    c = json.loads(s["content"])
+                    used_counts[c["tool"]] = used_counts.get(c["tool"], 0) + 1
+                except Exception:
+                    pass
+    else:
+        task_id = task_create(user, task)
+        idx = 0
+
+    provider = "-"
+    answer = None
     for step in range(max_steps):
         raw, provider = llm_chat([
-            {"role": "system", "content": "你是飞脑Agent。可用工具：%s。如需工具，输出JSON：{\"tool\":\"名称\",\"args\":{...}}；若可回答，直接输出答案并遵守：%s [PILOT:react]" %
-             (json.dumps({k: v["desc"] for k, v in TOOLS.items()}, ensure_ascii=False), VERIFY_TAIL)},
+            {"role": "system", "content": _react_system_prompt(trace)},
             {"role": "user", "content": "任务：%s\n已执行：%s" % (task, json.dumps(trace, ensure_ascii=False)[:1500])},
         ], user)
         m = re.search(r"\{.*\}", raw, re.S)
         if not (m and '"tool"' in raw):
-            audit_log(user, "react", {"task": task}, raw[:200], True)
-            return {"answer": raw, "steps": trace, "provider": provider}
+            answer = raw
+            task_step(task_id, idx, "answer", raw[:2000])
+            idx += 1
+            break
         try:
             call = json.loads(m.group(0))
             tool = TOOLS.get(call["tool"])
             if not tool:
                 raise ValueError("unknown tool " + call["tool"])
+            ok, reason = policy_check(call["tool"], user, used_counts)
+            if not ok:
+                # 权限/预算拒绝：不执行，把原因喂回模型，让它换路或直接回答
+                entry = {"tool": call["tool"], "denied": reason}
+                trace.append(entry)
+                task_step(task_id, idx, "denied", json.dumps(entry, ensure_ascii=False))
+                idx += 1
+                continue
+            pol = tool_policy(call["tool"])
+            if pol["requires_confirm"]:
+                entry = {"tool": call["tool"], "args": call.get("args", {}),
+                         "status": "需要人工确认，未执行"}
+                trace.append(entry)
+                task_step(task_id, idx, "pending", json.dumps(entry, ensure_ascii=False))
+                idx += 1
+                continue
+            used_counts[call["tool"]] = used_counts.get(call["tool"], 0) + 1
+            task_step(task_id, idx, "tool_call", json.dumps(
+                {"tool": call["tool"], "args": call.get("args", {})}, ensure_ascii=False))
+            idx += 1
             obs = tool["fn"](call.get("args", {}))
+            task_step(task_id, idx, "tool_result", json.dumps(obs, ensure_ascii=False)[:2000])
+            idx += 1
             trace.append({"tool": call["tool"], "args": call.get("args", {}),
                           "obs": json.dumps(obs, ensure_ascii=False)[:600]})
         except Exception as e:
-            trace.append({"error": str(e)[:200]})
-    return {"answer": "已达最大步数上限，部分结果如下", "steps": trace, "provider": provider}
+            entry = {"error": str(e)[:200]}
+            trace.append(entry)
+            task_step(task_id, idx, "error", json.dumps(entry, ensure_ascii=False))
+            idx += 1
+
+    if answer is None:
+        answer = "已达最大步数上限，部分结果如下（任务进度已落库，可用 task_id=%d 续跑）" % task_id
+        task_finish(task_id, "active")
+    else:
+        task_finish(task_id, "done")
+    eid = evidence_log(user, "react", None, task, answer, provider,
+                       sources=[s.get("tool") for s in trace if isinstance(s, dict) and s.get("tool")],
+                       trace=trace, context_tokens=sum(len(json.dumps(s, ensure_ascii=False)) for s in trace))
+    audit_log(user, "react", {"task": task, "task_id": task_id}, answer[:200], True)
+    return {"answer": answer, "steps": trace, "provider": provider,
+            "task_id": task_id, "evidence_id": eid}

@@ -130,6 +130,8 @@ class Handler(BaseHTTPRequestHandler):
                     "消息": conn.execute("SELECT COUNT(*) c FROM messages").fetchone()["c"],
                     "审计": conn.execute("SELECT COUNT(*) c FROM audit").fetchone()["c"],
                     "知识文档": conn.execute("SELECT COUNT(*) c FROM docs").fetchone()["c"],
+                    "任务": conn.execute("SELECT COUNT(*) c FROM tasks").fetchone()["c"],
+                    "证据": conn.execute("SELECT COUNT(*) c FROM evidence").fetchone()["c"],
                 }
                 ok_calls = conn.execute("SELECT COUNT(*) c FROM usage WHERE ok=1").fetchone()["c"]
                 fail_calls = conn.execute("SELECT COUNT(*) c FROM usage WHERE ok=0").fetchone()["c"]
@@ -171,6 +173,31 @@ class Handler(BaseHTTPRequestHandler):
                     r["last"] = (last["content"][:40] if last else "")
                 conn.close()
                 return self._json(200, {"rows": rows})
+            if len(parts) == 2 and parts[1] == "tasks":
+                # GET /api/tasks —— 当前用户的任务列表（State 层）
+                me = _auth(self)
+                if not me:
+                    return self._json(401, {"error": "请先登录"})
+                return self._json(200, {"rows": ai.task_list(user=me["user"])})
+            if parts[1:3] == ["tasks", "detail"]:
+                # GET /api/tasks/detail?id=N —— 任务详情 + 全部步骤
+                me = _auth(self)
+                if not me:
+                    return self._json(401, {"error": "请先登录"})
+                tid = int((qs.get("id") or ["0"])[0])
+                if not tid:
+                    return self._json(422, {"error": "id 必填"})
+                t = ai.task_get(tid, user=me["user"])
+                if not t:
+                    return self._json(404, {"error": "任务不存在或不属于当前用户"})
+                return self._json(200, t)
+            if len(parts) == 2 and parts[1] == "evidence":
+                # GET /api/evidence?conv_id=N —— 证据链查询（Harness 第 5 层）
+                me = _auth(self)
+                if not me:
+                    return self._json(401, {"error": "请先登录"})
+                cid = int((qs.get("conv_id") or ["0"])[0]) or None
+                return self._json(200, {"rows": ai.evidence_list(user=me["user"], conv_id=cid)})
             if len(parts) == 2 and parts[1] == "lcm":
                 # GET /api/lcm?conv_id=N —— 会话的库结构统计与摘要节点（DAG 视图）
                 me = _auth(self)
@@ -233,9 +260,10 @@ class Handler(BaseHTTPRequestHandler):
 
             if parts[1:3] == ["ai", "react"]:
                 task = (body.get("task") or "").strip()
-                if not task:
-                    return self._json(422, {"error": "task 必填"})
-                return self._json(200, ai.react_run(task, user))
+                if not task and not body.get("task_id"):
+                    return self._json(422, {"error": "task 必填（续跑时 task 可空）"})
+                return self._json(200, ai.react_run(task or "（续跑）", user,
+                                                    task_id=body.get("task_id")))
 
             if parts[1:3] == ["chat"]:
                 text = (body.get("text") or "").strip()

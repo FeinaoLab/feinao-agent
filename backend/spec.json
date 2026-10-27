@@ -25,5 +25,9 @@
     "rag_topk": 5,
     "nl2api_max_rows": 50,
     "react_max_steps": 6
+  },
+  "tool_policies": {
+    "search_docs": {"max_calls_per_run": 3, "roles": ["admin", "ops", "viewer"], "requires_confirm": false},
+    "query_system": {"max_calls_per_run": 2, "roles": ["admin", "ops"], "requires_confirm": false}
   }
 }

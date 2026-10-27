@@ -275,10 +275,16 @@ class LCM:
         ai.audit_log(self.user, "lcm_ask",
                      {"conv": self.conv_id, "q": q, "ctx_tokens": msgs_tokens(ctx),
                       "detail": [d["seq"] for d in detail]}, ans[:200], True)
+        eid = ai.evidence_log(self.user, "lcm", self.conv_id, q, ans, provider,
+                              sources=[{"seq": d["seq"], "role": d["role"]} for d in detail],
+                              trace={"summaries": ctx[0]["content"].count("[历史摘要") if ctx and ctx[0]["role"] == "system" else 0,
+                                     "turns": self._seq},
+                              context_tokens=msgs_tokens(ctx))
         return {"answer": ans, "provider": provider, "conv_id": self.conv_id,
                 "context_tokens": msgs_tokens(ctx),
                 "summaries": ctx[0]["content"].count("[历史摘要") if ctx and ctx[0]["role"] == "system" else 0,
-                "detail_back": [d["seq"] for d in detail]}
+                "detail_back": [d["seq"] for d in detail],
+                "evidence_id": eid}
 
 
 # ---------------- 摘要生成（LLM 优先，抽取式兜底） ----------------

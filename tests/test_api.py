@@ -107,9 +107,30 @@ def test_full():
         assert st == 200 and "deepseek" in j.get("chain", []), "providers health fail"
         assert any(p["name"] == "mock" and p["ok"] for p in j["providers"]), "mock 应可用"
 
-        # ReAct（mock 下一步直接回答）
+        # ReAct（mock 下一步直接回答）：应生成任务 + 证据
         st, j = req("/api/ai/react", "POST", {"task": "总结飞系架构"}, tok)
-        assert st == 200 and j.get("answer"), "react fail"
+        assert st == 200 and j.get("answer") and j.get("task_id") and j.get("evidence_id"), "react fail"
+        task_id = j["task_id"]
+
+        # State 层：任务列表 / 详情（含步骤）
+        st, j = req("/api/tasks", token=tok)
+        assert st == 200 and any(r["id"] == task_id for r in j["rows"]), "tasks 列表 fail"
+        st, j = req("/api/tasks/detail?id=%d" % task_id, token=tok)
+        assert st == 200 and j["goal"] and isinstance(j["steps"], list) and j["steps"], "tasks detail fail"
+        assert j["status"] == "done", "mock 直接回答应 done"
+
+        # 证据链：LCM 对话后应可按会话查到证据
+        st, j = req("/api/chat", "POST", {"text": "再来一句验证证据链", "conv_id": conv}, tok)
+        assert st == 200 and j.get("evidence_id"), "chat 应带 evidence_id"
+        eid = j["evidence_id"]
+        st, j = req("/api/evidence?conv_id=%d" % conv, token=tok)
+        assert st == 200 and any(r["id"] == eid for r in j["rows"]), "evidence 查询 fail"
+        row = next(r for r in j["rows"] if r["id"] == eid)
+        assert row["channel"] == "lcm" and "context_tokens" in row and "sources" in row, "证据字段不全"
+
+        # 续跑入口：done 任务应被拒绝（422/错误信息）
+        st, j = req("/api/ai/react", "POST", {"task": "", "task_id": task_id}, tok)
+        assert st == 200 and "error" in j, "done 任务不应可续跑"
 
         # 审计
         st, j = req("/api/audit", token=tok)
