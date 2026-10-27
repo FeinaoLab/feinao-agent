@@ -252,6 +252,9 @@ class Handler(BaseHTTPRequestHandler):
                 msgs = body.get("messages") or []
                 if not msgs:
                     return self._json(422, {"error": "messages 必填"})
+                # 兼容链路：客户端没带 system 时补上人设 + 验证型收尾要求
+                if not any(m.get("role") == "system" for m in msgs):
+                    msgs = [{"role": "system", "content": "你是飞脑，飞系 52 个项目的 AI 助手。\n" + ai.VERIFY_TAIL}] + msgs
                 conn = ai.db()
                 cur = conn.execute("INSERT INTO conversations(user,title,created) VALUES(?,?,?)",
                                    (user, (msgs[-1].get("content") or "")[:40],
