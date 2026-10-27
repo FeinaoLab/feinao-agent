@@ -26,8 +26,15 @@
     "nl2api_max_rows": 50,
     "react_max_steps": 6
   },
+  "approval": {
+    "name": "飞审审批工作台",
+    "approvers": ["admin"],
+    "allow_self": true,
+    "ttl_minutes": 1440
+  },
   "tool_policies": {
     "search_docs": {"max_calls_per_run": 3, "roles": ["admin", "ops", "viewer"], "requires_confirm": false},
-    "query_system": {"max_calls_per_run": 2, "roles": ["admin", "ops"], "requires_confirm": false}
+    "query_system": {"max_calls_per_run": 2, "roles": ["admin", "ops"], "requires_confirm": false},
+    "ingest_doc": {"max_calls_per_run": 1, "roles": ["admin", "ops"], "requires_confirm": true}
   }
 }

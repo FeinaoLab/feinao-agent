@@ -132,6 +132,15 @@ def test_full():
         st, j = req("/api/ai/react", "POST", {"task": "", "task_id": task_id}, tok)
         assert st == 200 and "error" in j, "done 任务不应可续跑"
 
+        # 审批工作台（HTTP 契约；mock 模型不会触发写操作，端到端见线上验收）
+        st, j = req("/api/approvals", token=tok)
+        assert st == 200 and j.get("can_approve") is True and isinstance(j["rows"], list), "approvals 列表 fail"
+        assert "admin" in j.get("approvers", []), "审批人配置不对"
+        st, j = req("/api/approvals/decide", "POST", {"id": 999999, "decision": "approved"}, tok)
+        assert st == 404, "不存在的审批单应 404"
+        st, j = req("/api/approvals/decide", "POST", {"id": 1, "decision": "bogus"}, tok)
+        assert st == 422, "非法 decision 应 422"
+
         # 审计
         st, j = req("/api/audit", token=tok)
         assert st == 200 and len(j["rows"]) >= 3, "audit fail"
@@ -141,6 +150,9 @@ def test_full():
         vtok = j["token"]
         st, j = req("/api/audit", token=vtok)
         assert st == 403 or st == 401, "viewer should not see audit"
+        # viewer 无审批权（只能看自己发起的单子）
+        st, j = req("/api/approvals", token=vtok)
+        assert st == 200 and j.get("can_approve") is False, "viewer 不应有审批权"
 
         # 静态页
         import urllib.request as ur

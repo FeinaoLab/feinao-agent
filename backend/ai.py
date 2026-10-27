@@ -74,6 +74,10 @@ def init_db():
     CREATE TABLE IF NOT EXISTS task_steps(
         id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INT, idx INT,
         kind TEXT, content TEXT, created TEXT);
+    CREATE TABLE IF NOT EXISTS approvals(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INT, step_idx INT, user TEXT,
+        tool TEXT, args TEXT, reason TEXT, status TEXT DEFAULT 'pending', consumed INT DEFAULT 0,
+        created TEXT, decided TEXT, decided_by TEXT, note TEXT, result TEXT);
     """)
     for u, p in SPEC["users"].items():
         conn.execute("INSERT OR IGNORE INTO users VALUES(?,?,?)",
@@ -179,15 +183,271 @@ def tool_policy(name):
     }
 
 
-def policy_check(name, user, used_counts):
-    """返回 (ok, reason)。ok=False 时工具不执行。"""
+def policy_role_ok(name, user):
     pol = tool_policy(name)
     role = user_role(user)
     if role not in pol["roles"]:
         return False, "角色 %s 无权调用 %s（允许：%s）" % (role, name, ",".join(pol["roles"]))
+    return True, ""
+
+
+def policy_budget_ok(name, used_counts):
+    pol = tool_policy(name)
     if used_counts.get(name, 0) >= pol["max_calls_per_run"]:
         return False, "%s 已达单次任务预算上限 %d 次" % (name, pol["max_calls_per_run"])
     return True, ""
+
+
+def policy_check(name, user, used_counts):
+    """返回 (ok, reason)。ok=False 时工具不执行。"""
+    ok, reason = policy_role_ok(name, user)
+    if not ok:
+        return False, reason
+    return policy_budget_ok(name, used_counts)
+
+
+# ---------------- 审批工作台（Permission 层的真闸门） ----------------
+#
+# 原则：放行的是"挂起的那一次具体动作"，不是给模型一张空白通行证。
+# 审批单落库可查，放行后由系统真的执行该动作，再把任务交回模型继续。
+
+def _now():
+    return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def approval_policy():
+    p = SPEC.get("approval") or {}
+    return {
+        "name": p.get("name") or "飞审审批工作台",
+        "approvers": p.get("approvers") or ["admin"],
+        "allow_self": bool(p.get("allow_self", True)),
+        "ttl_minutes": int(p.get("ttl_minutes", 1440)),
+    }
+
+
+def approval_request(user, task_id, step_idx, tool, args, reason=""):
+    """挂起一次需确认的动作（不执行），返回审批单 id。"""
+    conn = db()
+    cur = conn.execute(
+        "INSERT INTO approvals(task_id,step_idx,user,tool,args,reason,status,consumed,created) "
+        "VALUES(?,?,?,?,?,?,'pending',0,?)",
+        (task_id, step_idx, user, tool, json.dumps(args or {}, ensure_ascii=False),
+         (reason or "")[:300], _now()))
+    conn.commit()
+    aid = cur.lastrowid
+    conn.close()
+    audit_log(user, "approval_request", {"tool": tool, "task_id": task_id},
+              "approval id=%d" % aid, True)
+    return aid
+
+
+def _approval_row(r):
+    d = dict(r)
+    try:
+        d["args"] = json.loads(d.get("args") or "{}")
+    except Exception:
+        d["args"] = {}
+    return d
+
+
+def approval_get(aid):
+    conn = db()
+    row = conn.execute("SELECT * FROM approvals WHERE id=?", (aid,)).fetchone()
+    conn.close()
+    return _approval_row(row) if row else None
+
+
+def _expire_stale():
+    """超时的待审批单自动置 expired——挂着不处理也是一种决定。"""
+    ttl = approval_policy()["ttl_minutes"]
+    cutoff = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - ttl * 60))
+    conn = db()
+    n = conn.execute("UPDATE approvals SET status='expired' WHERE status='pending' AND created<?",
+                     (cutoff,)).rowcount
+    conn.commit()
+    conn.close()
+    return n
+
+
+def approval_list(status="pending", user=None, only_mine=False, limit=50):
+    """审批列表：有审批权的人看全部待办，其他人只看自己发起的。"""
+    _expire_stale()
+    sql = "SELECT * FROM approvals"
+    where, args = [], []
+    if status and status != "all":
+        where.append("status=?")
+        args.append(status)
+    if only_mine and user:
+        where.append("user=?")
+        args.append(user)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(limit)
+    conn = db()
+    rows = [_approval_row(r) for r in conn.execute(sql, args)]
+    conn.close()
+    for r in rows:  # 带上任务目标，工作台上看得懂在批什么
+        t = task_get(r["task_id"]) if r.get("task_id") else None
+        r["goal"] = (t or {}).get("goal", "")
+    return rows
+
+
+def approval_decide(aid, decision, by, note=""):
+    """人工决策：approved / rejected。返回 (ok, msg, row)。"""
+    if decision not in ("approved", "rejected"):
+        return False, "decision 须为 approved / rejected", None
+    row = approval_get(aid)
+    if not row:
+        return False, "审批单不存在", None
+    pol = approval_policy()
+    role = user_role(by)
+    if role not in pol["approvers"]:
+        return False, "角色 %s 无审批权（审批人：%s）" % (role, ",".join(pol["approvers"])), row
+    if not pol["allow_self"] and row["user"] == by:
+        return False, "不允许审批自己发起的动作", row
+    conn = db()
+    n = conn.execute(
+        "UPDATE approvals SET status=?,decided=?,decided_by=?,note=? WHERE id=? AND status='pending'",
+        (decision, _now(), by, (note or "")[:300], aid)).rowcount
+    conn.commit()
+    conn.close()
+    if not n:
+        return False, "审批单状态为 %s，不可重复处理" % (approval_get(aid) or {}).get("status"), row
+    audit_log(by, "approval_" + decision, {"id": aid, "tool": row["tool"], "requester": row["user"]},
+              (note or "")[:200], decision == "approved")
+    return True, ("已放行" if decision == "approved" else "已拒绝"), approval_get(aid)
+
+
+def _task_used_counts(task_id):
+    conn = db()
+    rows = conn.execute("SELECT content FROM task_steps WHERE task_id=? AND kind='tool_call'",
+                        (task_id,)).fetchall()
+    conn.close()
+    out = {}
+    for r in rows:
+        try:
+            out[json.loads(r["content"])["tool"]] = out.get(json.loads(r["content"])["tool"], 0) + 1
+        except Exception:
+            pass
+    return out
+
+
+def _task_next_idx(task_id):
+    conn = db()
+    row = conn.execute("SELECT MAX(idx) m FROM task_steps WHERE task_id=?", (task_id,)).fetchone()
+    conn.close()
+    return ((row["m"] + 1) if row and row["m"] is not None else 0)
+
+
+def _prev_result(task_id, tool, args):
+    """同一任务里是否已经执行过完全相同的动作（tool+args）。
+
+    用于写操作幂等：模型在放行后重复要同一动作，直接复用结果，不重复落库、不占预算。
+    """
+    want = json.dumps(args or {}, ensure_ascii=False, sort_keys=True)
+    conn = db()
+    rows = conn.execute(
+        "SELECT idx,kind,content FROM task_steps WHERE task_id=? AND kind IN ('tool_call','tool_result') ORDER BY idx",
+        (task_id,)).fetchall()
+    conn.close()
+    seq = [dict(r) for r in rows]
+    for i, s in enumerate(seq):
+        if s["kind"] != "tool_call":
+            continue
+        try:
+            c = json.loads(s["content"])
+        except Exception:
+            continue
+        if c.get("tool") != tool:
+            continue
+        if json.dumps(c.get("args") or {}, ensure_ascii=False, sort_keys=True) != want:
+            continue
+        for nxt in seq[i + 1:]:
+            if nxt["kind"] == "tool_result":
+                return nxt["content"]
+            if nxt["kind"] == "error":
+                return None
+    return None
+
+
+def _rejected_before(task_id, tool, args):
+    """同一任务里是否有过被拒绝的完全相同的动作 → 返回该审批单（避免反复打扰审批人）。"""
+    if not task_id:
+        return None
+    want = json.dumps(args or {}, ensure_ascii=False, sort_keys=True)
+    conn = db()
+    rows = conn.execute(
+        "SELECT * FROM approvals WHERE task_id=? AND tool=? AND status='rejected' ORDER BY id DESC",
+        (task_id, tool)).fetchall()
+    conn.close()
+    for r in rows:
+        try:
+            if json.dumps(json.loads(r["args"] or "{}"), ensure_ascii=False, sort_keys=True) == want:
+                return _approval_row(r)
+        except Exception:
+            continue
+    return None
+
+
+def approval_handle(aid, decision, by, note="", resume=True):
+    """审批工作台唯一入口：决策 → 放行则真执行该动作 → 把任务交回模型续跑。"""
+    ok, msg, row = approval_decide(aid, decision, by, note)
+    if not ok:
+        return {"error": msg, "approval": row}
+    task_id = row.get("task_id")
+    out = {"approval": approval_get(aid), "approved": decision == "approved", "decision": decision}
+    idx = _task_next_idx(task_id) if task_id else 0
+
+    if decision == "rejected":
+        entry = {"tool": row["tool"], "args": row["args"],
+                 "denied": "审批被拒绝：%s" % (note or "无理由")}
+        if task_id:
+            task_step(task_id, idx, "denied", json.dumps(entry, ensure_ascii=False))
+    else:
+        tool = TOOLS.get(row["tool"])
+        if not tool:
+            return {"error": "工具 %s 已不存在，无法执行" % row["tool"],
+                    "approval": approval_get(aid)}
+        if task_id:
+            ok2, reason = policy_check(row["tool"], row["user"], _task_used_counts(task_id))
+            if not ok2:
+                # 放行也不能越过角色/预算：审批单退回 pending，等人改主意
+                conn = db()
+                conn.execute("UPDATE approvals SET status='pending',decided=NULL,decided_by=NULL,note=? WHERE id=?",
+                             ("放行受阻：" + reason, aid))
+                conn.commit()
+                conn.close()
+                return {"error": "放行失败：" + reason, "approval": approval_get(aid)}
+            task_step(task_id, idx, "tool_call", json.dumps(
+                {"tool": row["tool"], "args": row["args"], "approved_by": by}, ensure_ascii=False))
+            idx += 1
+        try:
+            obs = tool["fn"](row["args"])
+            if task_id:
+                task_step(task_id, idx, "tool_result", json.dumps(obs, ensure_ascii=False)[:2000])
+            _set_approval_result(aid, 1, json.dumps(obs, ensure_ascii=False)[:1000])
+            out["result"] = obs
+        except Exception as e:
+            err = {"error": str(e)[:200]}
+            if task_id:
+                task_step(task_id, idx, "error", json.dumps(err, ensure_ascii=False))
+            _set_approval_result(aid, 1, "error: " + str(e)[:200])
+            out["result"] = err
+
+    if task_id:
+        task_finish(task_id, "active")  # 挂起时是 waiting_approval，先放回可续跑
+        if resume:
+            t = task_get(task_id)
+            out["run"] = react_run((t or {}).get("goal") or "（续跑）", row["user"], task_id=task_id)
+    return out
+
+
+def _set_approval_result(aid, consumed, result):
+    conn = db()
+    conn.execute("UPDATE approvals SET consumed=?, result=? WHERE id=?", (consumed, result, aid))
+    conn.commit()
+    conn.close()
 
 
 # ---------------- LLM 网关（多供应商 + combo 降级链） ----------------
@@ -544,6 +804,10 @@ TOOLS = {
                     "fn": lambda a: rag_search(a.get("q", ""))},
     "query_system": {"desc": "查询飞系系统数据（system: kms/bi/cc…, entity: 实体key）", "args": {"system": "str", "entity": "str", "q": "str"},
                      "fn": lambda a: upstream_rows(a["system"], a["entity"], a.get("q", ""), 10)},
+    # 写操作：会真的落库，所以 requires_confirm=true，必须人工放行（审批工作台）
+    "ingest_doc": {"desc": "把一段内容写入飞脑知识库（写操作，需人工审批）", "args": {"title": "str", "body": "str"},
+                   "fn": lambda a: {"doc_id": rag_ingest((a.get("title") or "未命名")[:120],
+                                                        (a.get("body") or "")[:4000], "agent")}},
 }
 
 
@@ -628,7 +892,7 @@ def react_run(task, user="admin", task_id=None, max_steps=None):
         if t["status"] != "active":
             return {"error": "任务状态为 %s，仅 active 任务可续跑" % t["status"]}
         for s in t["steps"]:
-            if s["kind"] in ("tool_call", "tool_result", "error"):
+            if s["kind"] in ("tool_call", "tool_result", "error", "denied", "replay"):
                 trace.append(json.loads(s["content"]))
         idx = (t["steps"][-1]["idx"] + 1) if t["steps"] else 0
         for s in t["steps"]:
@@ -660,9 +924,9 @@ def react_run(task, user="admin", task_id=None, max_steps=None):
             tool = TOOLS.get(call["tool"])
             if not tool:
                 raise ValueError("unknown tool " + call["tool"])
-            ok, reason = policy_check(call["tool"], user, used_counts)
+            ok, reason = policy_role_ok(call["tool"], user)
             if not ok:
-                # 权限/预算拒绝：不执行，把原因喂回模型，让它换路或直接回答
+                # 角色越权：不执行，把原因喂回模型，让它换路或直接回答
                 entry = {"tool": call["tool"], "denied": reason}
                 trace.append(entry)
                 task_step(task_id, idx, "denied", json.dumps(entry, ensure_ascii=False))
@@ -670,10 +934,44 @@ def react_run(task, user="admin", task_id=None, max_steps=None):
                 continue
             pol = tool_policy(call["tool"])
             if pol["requires_confirm"]:
+                # 同一动作此前已被审批人拒绝 → 直接拒，不再重复挂单（不打扰人）
+                rej = _rejected_before(task_id, call["tool"], call.get("args", {}))
+                if rej:
+                    entry = {"tool": call["tool"], "args": call.get("args", {}),
+                             "denied": "该动作已被审批人拒绝（审批单 #%d）：%s；请勿重复提交"
+                                       % (rej["id"], rej.get("note") or "无理由")}
+                    trace.append(entry)
+                    task_step(task_id, idx, "denied", json.dumps(entry, ensure_ascii=False))
+                    idx += 1
+                    continue
+                # 写操作：先看同一动作是否已放行执行过（幂等回放，不算新调用），否则挂起等人工审批
+                prev = _prev_result(task_id, call["tool"], call.get("args", {}))
+                if prev is not None:
+                    entry = {"tool": call["tool"], "args": call.get("args", {}),
+                             "obs": prev, "replay": True,
+                             "note": "同一动作已在本任务放行执行过，复用结果（不重复执行、不占预算）"}
+                    trace.append(entry)
+                    task_step(task_id, idx, "replay", json.dumps(entry, ensure_ascii=False)[:2000])
+                    idx += 1
+                    continue
+                aid = approval_request(user, task_id, idx, call["tool"], call.get("args", {}),
+                                       reason="动作级策略要求人工确认")
                 entry = {"tool": call["tool"], "args": call.get("args", {}),
-                         "status": "需要人工确认，未执行"}
+                         "status": "需要人工确认，已挂起等待审批", "approval_id": aid}
                 trace.append(entry)
                 task_step(task_id, idx, "pending", json.dumps(entry, ensure_ascii=False))
+                idx += 1
+                task_finish(task_id, "waiting_approval")
+                return {"answer": ("动作 %s 需要人工审批后才能执行：已生成审批单 #%d，任务 #%d 已挂起。"
+                                   "审批人在「审批」页放行后任务会自动继续；拒绝则该动作不执行。"
+                                   % (call["tool"], aid, task_id)),
+                        "status": "waiting_approval", "approval_id": aid,
+                        "task_id": task_id, "steps": trace, "provider": provider}
+            ok, reason = policy_budget_ok(call["tool"], used_counts)
+            if not ok:
+                entry = {"tool": call["tool"], "denied": reason}
+                trace.append(entry)
+                task_step(task_id, idx, "denied", json.dumps(entry, ensure_ascii=False))
                 idx += 1
                 continue
             used_counts[call["tool"]] = used_counts.get(call["tool"], 0) + 1

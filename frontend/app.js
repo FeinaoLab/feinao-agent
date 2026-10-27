@@ -116,6 +116,89 @@ function pilotsView() {
   };
 }
 
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+  });
+}
+
+var APV = 'pending';
+
+function approvalsView() {
+  var tabs = [['pending', '待审批'], ['approved', '已放行'], ['rejected', '已拒绝'], ['all', '全部']];
+  $('#view').innerHTML = '<div class="apv">' +
+    '<div class="apv-title">飞审 · 审批工作台</div>' +
+    '<div class="apv-bar"><b id="apv-n">加载中…</b><span id="apv-role"></span></div>' +
+    '<div class="apv-tabs" id="apv-tabs">' + tabs.map(function (t) {
+      return '<button data-s="' + t[0] + '"' + (t[0] === APV ? ' class="on"' : '') + '>' + t[1] + '</button>';
+    }).join('') + '</div>' +
+    '<div id="apv-list" class="apv-list">…</div></div>';
+
+  $('#apv-tabs').onclick = function (e) {
+    var b = e.target.closest('button'); if (!b) return;
+    APV = b.dataset.s;
+    document.querySelectorAll('#apv-tabs button').forEach(function (x) { x.classList.toggle('on', x.dataset.s === APV); });
+    load();
+  };
+
+  function load() {
+    api('approvals?status=' + APV).then(function (d) {
+      if (d.brand) { var t = document.querySelector('.apv-title'); if (t) t.textContent = d.brand; }
+      $('#apv-n').textContent = (APV === 'pending' ? '待审批 ' + d.rows.length + ' 条' : '共 ' + d.rows.length + ' 条');
+      $('#apv-role').textContent = '我的角色：' + d.my_role + ' ｜ 审批人：' + (d.approvers || []).join('、') +
+        (d.can_approve ? '（你可放行/拒绝）' : '（只读：你不是审批人）');
+      if (!d.rows.length) {
+        $('#apv-list').innerHTML = '<div class="apv-empty">这里没有单据。需要审批的动作由 Agent 触发：写操作会在执行前挂起一张单。</div>';
+        return;
+      }
+      $('#apv-list').innerHTML = d.rows.map(function (r) {
+        var tag = { pending: '待审批', approved: '已放行', rejected: '已拒绝', expired: '已超时' }[r.status] || r.status;
+        var cls = { pending: '', approved: 'ok', rejected: 'bad', expired: 'bad' }[r.status] || '';
+        var btns = (r.status === 'pending' && d.can_approve)
+          ? '<div class="apv-act"><button class="go" data-id="' + r.id + '" data-d="approved">放行并执行</button>' +
+            '<button class="no" data-id="' + r.id + '" data-d="rejected">拒绝</button></div>' : '';
+        var result = r.result ? '<div class="apv-res">执行结果：' + esc(String(r.result).slice(0, 300)) + '</div>' : '';
+        var meta = (r.decided ? '决策：' + esc(r.decided_by || '') + ' @ ' + esc(r.decided) + (r.note ? '（' + esc(r.note) + '）' : '') : '');
+        return '<div class="apv-card" id="apv-c' + r.id + '">' +
+          '<div class="apv-h"><b>#' + r.id + ' ' + esc(r.tool) + '</b><span class="tag ' + cls + '">' + tag + '</span></div>' +
+          '<div class="apv-kv">发起人 ' + esc(r.user) + ' ｜ 任务 #' + (r.task_id || '-') +
+          ' ｜ ' + esc(r.created) + '</div>' +
+          (r.goal ? '<div class="apv-goal">任务目标：' + esc(r.goal) + '</div>' : '') +
+          '<div class="apv-args">' + esc(JSON.stringify(r.args)) + '</div>' +
+          (r.reason ? '<div class="apv-kv">挂起原因：' + esc(r.reason) + '</div>' : '') +
+          (meta ? '<div class="apv-kv">' + meta + '</div>' : '') +
+          result + '<div class="apv-out" id="apv-o' + r.id + '"></div>' + btns + '</div>';
+      }).join('');
+    }).catch(function (m) { $('#apv-list').textContent = '加载失败：' + m; });
+  }
+
+  $('#apv-list').onclick = function (e) {
+    var b = e.target.closest('button[data-id]'); if (!b) return;
+    var id = b.dataset.id, decision = b.dataset.d;
+    var note = '';
+    if (decision === 'rejected') note = prompt('拒绝理由（会回给模型，可留空）：') || '';
+    b.disabled = true;
+    var out = $('#apv-o' + id);
+    if (out) out.textContent = decision === 'approved' ? '放行中，正在执行动作…' : '处理中…';
+    api('approvals/decide', { method: 'POST', body: { id: parseInt(id, 10), decision: decision, note: note } })
+      .then(function (d) {
+        var run = d.run || {};
+        var txt = (d.approved ? '✅ 已放行并执行' : '⛔ 已拒绝') +
+          (d.result ? '\n执行结果：' + JSON.stringify(d.result).slice(0, 400) : '') +
+          (run.task_id ? '\n任务 #' + run.task_id + ' 状态：' + (run.status || (run.answer ? 'done' : '-')) : '') +
+          (run.answer ? '\n\n' + run.answer : '');
+        if (out) out.textContent = txt;
+        setTimeout(load, 600);
+      })
+      .catch(function (m) {
+        if (out) out.textContent = '操作失败：' + m;
+        b.disabled = false;
+      });
+  };
+
+  load();
+}
+
 function auditView() {
   $('#view').innerHTML = '<div class="kpis" id="kpis"></div><div id="tbl">加载中…</div>';
   api('dashboard').then(function (d) {
@@ -137,6 +220,7 @@ function render() {
   document.querySelectorAll('#nav a').forEach(function (a) { a.classList.toggle('on', a.dataset.k === CUR); });
   if (CUR === 'chat') chatView();
   else if (CUR === 'pilots') pilotsView();
+  else if (CUR === 'approvals') approvalsView();
   else auditView();
 }
 

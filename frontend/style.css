@@ -1,5 +1,6 @@
 :root{--pri:#4f46e5;--bg:#f1f5f9}
 *{box-sizing:border-box;margin:0}
+[hidden]{display:none!important}
 body{font-family:system-ui,"Microsoft YaHei";background:var(--bg);color:#0f172a;font-size:14px}
 .lg-wrap{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
 .lg{background:#fff;border-radius:16px;padding:32px 24px;width:100%;max-width:340px;display:flex;flex-direction:column;gap:12px;text-align:center;box-shadow:0 10px 30px rgba(15,23,42,.12)}
@@ -43,3 +44,25 @@ th{background:#f8fafc;color:#64748b}
 .tag{display:inline-block;padding:1px 8px;border-radius:999px;background:#e2e8f0;font-size:11px}
 .tag.ok{background:#dcfce7;color:#166534}
 .tag.bad{background:#fee2e2;color:#991b1b}
+.apv-title{font-size:15px;font-weight:700;color:var(--pri);margin-bottom:8px;letter-spacing:.5px}
+.apv-bar{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.apv-bar b{font-size:16px}
+.apv-bar span{color:#64748b;font-size:12px}
+.apv-tabs{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
+.apv-tabs button{background:#fff;border:1px solid #e2e8f0;color:#475569;border-radius:999px;padding:5px 14px;font-size:12px;cursor:pointer}
+.apv-tabs button.on{background:var(--pri);border-color:var(--pri);color:#fff;font-weight:600}
+.apv-list{display:flex;flex-direction:column;gap:10px}
+.apv-empty{background:#fff;border-radius:12px;padding:18px;color:#64748b;font-size:13px;line-height:1.7}
+.apv-card{background:#fff;border-radius:12px;padding:14px;border-left:4px solid #f59e0b}
+.apv-h{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.apv-h b{font-size:14px}
+.apv-kv{color:#64748b;font-size:11px;line-height:1.8}
+.apv-goal{font-size:12px;margin:4px 0;color:#0f172a}
+.apv-args{background:#f8fafc;border-radius:8px;padding:8px;font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#334155;margin:6px 0;word-break:break-all}
+.apv-res{background:#f0fdf4;border-radius:8px;padding:8px;font-size:11px;color:#166534;margin:6px 0;word-break:break-all}
+.apv-out{font-size:12px;color:#334155;white-space:pre-wrap;margin:6px 0;line-height:1.7}
+.apv-act{display:flex;gap:8px;margin-top:6px}
+.apv-act button{border:0;border-radius:8px;padding:8px 16px;font-size:12px;cursor:pointer}
+.apv-act .go{background:#16a34a;color:#fff}
+.apv-act .no{background:#fee2e2;color:#991b1b}
+.apv-act button[disabled]{opacity:.6;cursor:default}

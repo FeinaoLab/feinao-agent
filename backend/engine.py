@@ -132,6 +132,8 @@ class Handler(BaseHTTPRequestHandler):
                     "知识文档": conn.execute("SELECT COUNT(*) c FROM docs").fetchone()["c"],
                     "任务": conn.execute("SELECT COUNT(*) c FROM tasks").fetchone()["c"],
                     "证据": conn.execute("SELECT COUNT(*) c FROM evidence").fetchone()["c"],
+                    "待审批": conn.execute(
+                        "SELECT COUNT(*) c FROM approvals WHERE status='pending'").fetchone()["c"],
                 }
                 ok_calls = conn.execute("SELECT COUNT(*) c FROM usage WHERE ok=1").fetchone()["c"]
                 fail_calls = conn.execute("SELECT COUNT(*) c FROM usage WHERE ok=0").fetchone()["c"]
@@ -191,6 +193,22 @@ class Handler(BaseHTTPRequestHandler):
                 if not t:
                     return self._json(404, {"error": "任务不存在或不属于当前用户"})
                 return self._json(200, t)
+            if len(parts) == 2 and parts[1] == "approvals":
+                # GET /api/approvals?status=pending|approved|rejected|expired|all
+                # 有审批权的人看全部待办，其他人只看自己发起的
+                me = _auth(self)
+                if not me:
+                    return self._json(401, {"error": "请先登录"})
+                pol = ai.approval_policy()
+                role = ai.user_role(me["user"])
+                can = role in pol["approvers"]
+                status = (qs.get("status") or ["pending"])[0]
+                rows = ai.approval_list(status=status, user=me["user"], only_mine=not can)
+                return self._json(200, {
+                    "rows": rows, "can_approve": can, "my_role": role,
+                    "brand": pol["name"],
+                    "approvers": pol["approvers"],
+                    "pending": len([r for r in rows if r["status"] == "pending"])})
             if len(parts) == 2 and parts[1] == "evidence":
                 # GET /api/evidence?conv_id=N —— 证据链查询（Harness 第 5 层）
                 me = _auth(self)
@@ -264,6 +282,25 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(422, {"error": "task 必填（续跑时 task 可空）"})
                 return self._json(200, ai.react_run(task or "（续跑）", user,
                                                     task_id=body.get("task_id")))
+
+            if parts[1:3] == ["approvals", "decide"]:
+                # POST /api/approvals/decide {id, decision: approved|rejected, note?}
+                # 放行 = 真执行挂起的那一次动作，然后任务自动续跑
+                aid = int(body.get("id") or 0)
+                decision = body.get("decision")
+                if not aid or decision not in ("approved", "rejected"):
+                    return self._json(422, {"error": "id / decision(approved|rejected) 必填"})
+                r = ai.approval_handle(aid, decision, user, body.get("note", ""))
+                if r.get("error"):
+                    msg = r["error"]
+                    if "无审批权" in msg or "无权" in msg or "不允许" in msg:
+                        code = 403
+                    elif "不存在" in msg:
+                        code = 404
+                    else:
+                        code = 409
+                    return self._json(code, r)
+                return self._json(200, r)
 
             if parts[1:3] == ["chat"]:
                 text = (body.get("text") or "").strip()
