@@ -33,7 +33,9 @@ class Stub(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(n).decode() or "{}")
         SEEN.append({"auth": self.headers.get("Authorization", ""), "model": body.get("model"),
-                     "msgs": len(body.get("messages", []))})
+                     "msgs": len(body.get("messages", [])),
+                     "system": "\n".join(m.get("content", "") for m in body.get("messages", [])
+                                          if m.get("role") == "system")})
         out = json.dumps({
             "choices": [{"message": {"role": "assistant", "content": "在线"}}],
             "usage": {"prompt_tokens": 7, "completion_tokens": 2},
@@ -70,6 +72,46 @@ def test_env_file_loading(tmp_path):
     ai._load_env_file()
     assert os.environ.get("FEINAO_STUB_KEY") == "from-file", ".env 里的 Key 没读到"
     assert os.environ.get("FEINAO_EXISTING") == "env-value", "环境变量不该被 .env 覆盖"
+
+
+def test_verify_tail_in_prompts():
+    """验证型收尾要求必须出现在 rag / react / LCM 三条链路的系统提示里。
+    规矩：完成必须是可验证产物，不能是模型自述——所以写进提示词，而不是靠模型自觉。"""
+    srv = _start_stub()
+    saved = ai.SPEC["providers"]
+    try:
+        ai.SPEC["providers"] = [
+            {"name": "stub", "type": "openai", "base": STUB_BASE, "model": "stub-1",
+             "key_env": "FEINAO_STUB_KEY"},
+            {"name": "mock", "type": "mock"},
+        ]
+        os.environ["FEINAO_STUB_KEY"] = "sk-test-1234567890"
+
+        # ① rag 试点
+        ai.pilot_ask("库存预警阈值怎么配置")
+        s = SEEN[-1]["system"]
+        assert "回答收尾要求" in s and "[PILOT:rag]" in s, "rag 提示缺收尾要求"
+
+        # ② react Agent
+        ai.react_run("总结库存情况")
+        s = SEEN[-1]["system"]
+        assert "回答收尾要求" in s and "[PILOT:react]" in s, "react 提示缺收尾要求"
+
+        # ③ LCM 在线对话链路
+        import lcm
+        lcm.init_lcm_db()
+        o = lcm.LCM(user="admin", title="收尾话术验证")
+        o.append("user", "项目预算 380 万，机房在深圳坪山。")
+        o.ask("预算多少？", keep_recent=4, budget=900)
+        s = SEEN[-1]["system"]
+        assert "回答收尾要求" in s and "[PILOT:lcm]" in s, "LCM 提示缺收尾要求"
+
+        # ④ 兼容链路（无 system 的旧调用）由 engine 补人设 + 收尾要求
+        assert ai.VERIFY_TAIL.startswith("回答收尾要求")
+    finally:
+        ai.SPEC["providers"] = saved
+        os.environ.pop("FEINAO_STUB_KEY", None)
+        srv.shutdown()
 
 
 def test_real_provider_chain():
