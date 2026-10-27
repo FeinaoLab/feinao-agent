@@ -23,6 +23,15 @@ No API key needed: it falls back to a deterministic mock LLM and a built-in fake
 every screen works on first boot. Add a key to `.env` when you want real answers.
 (中文说明见 [README.zh-CN.md](README.zh-CN.md))
 
+<p align="center">
+  <img src="docs/screenshot-chat.png" width="860" alt="Knowledge Q&A with citations (demo mode, mock LLM)">
+  <br><sub>Knowledge Q&A out of the box — demo data, mock LLM, citations included.</sub>
+</p>
+<p align="center">
+  <img src="docs/screenshot-approvals.png" width="860" alt="Approval workbench: write actions wait for a human decision">
+  <br><sub>The approval workbench: a write action parked with its tool, arguments, requester and task goal. It runs only after someone clicks 放行并执行 (approve &amp; execute).</sub>
+</p>
+
 ---
 
 ## The problem this repo addresses

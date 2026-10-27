@@ -23,6 +23,15 @@ python backend/server.py          # 零依赖，不需要 pip install
 LLM Key（`FEINAO_QWEN_KEY` / `FEINAO_DEEPSEEK_KEY` / `FEINAO_HUNYUAN_KEY`）；一个都不填时自动
 降级到 mock，功能全在、回答质量弱。
 
+<p align="center">
+  <img src="docs/screenshot-chat.png" width="860" alt="知识问答带引用（演示模式，mock）">
+  <br><sub>开箱即用的知识问答：演示数据 + mock 模型，回答带引用。</sub>
+</p>
+<p align="center">
+  <img src="docs/screenshot-approvals.png" width="860" alt="飞审审批工作台">
+  <br><sub>审批闸门：写操作带着工具、参数、发起人、任务目标停在待审批区，点「放行并执行」才真跑。</sub>
+</p>
+
 ## 核心能力
 
 - **LLM 多供应商网关**：DeepSeek / 混元 / qwen / mock 按序降级重试（combo 链），用量落库（usage 表）；Key 支持环境变量与 `.env`，无 Key 自动降级 mock

@@ -505,7 +505,8 @@ def _call_mock(messages, **kw):
             scored.append((score, line.strip()))
         if scored:
             scored.sort(key=lambda x: -x[0])
-            top = [t for sc, t in scored[:2]]
+            # 去掉内部标记（[#3 user] 这类），复述内容而不是复述记账格式
+            top = [re.sub(r"^\[[^\]]*\]\s*", "", t) for sc, t in scored[:2]]
             return "（依据上下文）" + " ｜ ".join(x[:110] for x in top)
         return "（上下文中没有相关信息，无法回答）"
     if "[PILOT:sum]" in sys_txt:

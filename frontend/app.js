@@ -41,7 +41,8 @@ function chatView() {
   $('#csel').onchange = function () { CONV = parseInt(this.value, 10) || 0; if (CONV) localStorage.setItem('feinao_conv', CONV); renderConvs(); };
   renderConvs();
 
-  function renderConvs() {
+  function renderConvs(keepMsgs) {
+    // keepMsgs=true：只刷新下拉列表，不重放历史——刚得到的回答不该被统计行冲掉
     api('lcm_convs').then(function (d) {
       var rows = d.rows || [];
       if (!CONV && rows.length) { CONV = rows[0].id; localStorage.setItem('feinao_conv', CONV); }
@@ -50,16 +51,18 @@ function chatView() {
         return '<option value="' + r.id + '"' + (r.id === CONV ? ' selected' : '') + '>#' + r.id +
           ' ' + (r.title || '') .slice(0, 16) + '（' + r.turns + ' 轮）</option>';
       }).join('');
-      if (CONV) { sel.value = String(CONV); loadHistory(); }
+      if (CONV) { sel.value = String(CONV); if (!keepMsgs) loadHistory(); }
     }).catch(function () {});
   }
 
   function loadHistory() {
     api('lcm?conv_id=' + CONV).then(function (d) {
       var box = $('#msgs'); if (!box) return;
-      box.innerHTML = '<div class="msg ai">历史会话 #' + d.conv_id + '：' + d.turns +
-        ' 轮 / 原始 ' + d.raw_tokens + ' token，本轮上下文预算 ' + d.budget + ' token。</div>';
-      updateStat(d);
+      var st = d.stats || {};
+      box.innerHTML = '<div class="msg ai">历史会话 #' + (st.conv_id || CONV) + '：' + (st.turns || 0) +
+        ' 轮 / 原始 ' + (st.raw_tokens || 0) + ' token，本轮上下文预算 ' + (st.budget || 0) +
+        ' token' + (st.compression != null ? '（压缩 ' + Math.round(st.compression * 100) + '%）' : '') + '。</div>';
+      updateStat(st);
     }).catch(function () {});
   }
 
@@ -85,7 +88,7 @@ function chatView() {
           (d.detail_back && d.detail_back.length ? ' ｜ 回溯原文 #' + d.detail_back.join('、') : '') +
           (d.memory_ids && d.memory_ids.length ? ' ｜ 跨会话记忆 M#' + d.memory_ids.join('、M#') : ' ｜ 未命中跨会话记忆'));
         updateStat(d.stats);
-        renderConvs();
+        renderConvs(true);
       })
       .catch(function (m) { wait.textContent = '出错了：' + m; });
   }
@@ -93,9 +96,9 @@ function chatView() {
 
 function pilotsView() {
   $('#view').innerHTML = '<div class="pilots">' +
-    '<div class="pilot"><h3>📚 知识问答</h3><textarea id="p1" placeholder="问一个知识库内的问题…">飞系系统怎么部署？</textarea><button id="b1">提问</button><div class="out" id="o1"></div></div>' +
-    '<div class="pilot"><h3>📊 智能查数</h3><textarea id="p2" placeholder="用自然语言查飞瞰BI的数据…">查一下商品数据</textarea><button id="b2">查询</button><div class="out" id="o2"></div></div>' +
-    '<div class="pilot"><h3>💬 客服话术</h3><textarea id="p3" placeholder="描述客服场景…">客户嫌价格贵，如何应对</textarea><button id="b3">生成</button><div class="out" id="o3"></div></div>' +
+    '<div class="pilot"><h3>📚 知识问答</h3><textarea id="p1" placeholder="问一个知识库内的问题…">住宿报销标准是多少？</textarea><button id="b1">提问</button><div class="out" id="o1"></div></div>' +
+    '<div class="pilot"><h3>📊 智能查数</h3><textarea id="p2" placeholder="用自然语言查飞瞰BI的数据…">查一下订单数据</textarea><button id="b2">查询</button><div class="out" id="o2"></div></div>' +
+    '<div class="pilot"><h3>💬 客服话术</h3><textarea id="p3" placeholder="描述客服场景…">客户投诉发货太慢，如何应对</textarea><button id="b3">生成</button><div class="out" id="o3"></div></div>' +
     '</div>';
   $('#b1').onclick = function () {
     $('#o1').textContent = '检索中…';
