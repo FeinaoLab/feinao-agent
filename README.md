@@ -187,6 +187,7 @@ Details and known trade-offs: [SECURITY.md](SECURITY.md).
 - [docs/证据链-权限预算-任务状态-上线说明.md](docs/证据链-权限预算-任务状态-上线说明.md)
 - [docs/飞审审批工作台-上线说明.md](docs/飞审审批工作台-上线说明.md) — the approval gate
 - [docs/飞忆跨会话记忆-上线说明.md](docs/飞忆跨会话记忆-上线说明.md) — cross-session memory
+- [docs/Harness2-对照与差距清单.md](docs/Harness2-对照与差距清单.md) — how this repo maps onto Google's Harness² eight editable components, and what's still missing
 
 ## Contributing
 

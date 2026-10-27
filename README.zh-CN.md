@@ -106,7 +106,7 @@ CI（`.github/workflows/ci.yml`）在 Python 3.9 / 3.11 / 3.13 上跑全套，�
 - `frontend/` — 对话工作台 SPA（对话 + 三试点 + 审计看板 + 飞审 + 飞忆）
 - `mobile/` — PWA（对话 + 模式切换）
 - `tests/` — API 集成测试（真实起服全链路）+ LCM + 审批 + 记忆 + 演示契约
-- `docs/` — 建设方案、LCM 验证报告、各能力上线说明
+- `docs/` — 建设方案、LCM 验证报告、各能力上线说明、[Harness² 对照与差距清单](docs/Harness2-对照与差距清单.md)
 - `tools/` — Logo + UI 巡检 + LCM 对照实验脚本
 
 ## 部署前必读
