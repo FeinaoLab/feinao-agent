@@ -1,7 +1,7 @@
 # 飞脑 LCM 线上接入与真 Key 接入说明（2026-10-26）
 
 > 项目：飞脑 AI Agent 网关（feinao-agent，第 52 号项目）
-> 线上：http://42.193.158.63/nao/ ｜ 手机：http://42.193.158.63/nao/m/
+> 线上：http://<your-host>/nao/ ｜ 手机：http://<your-host>/nao/m/
 > 本次范围：① LCM 无损上下文接入线上对话链路 ② 真实 LLM Key 接入能力
 
 ---

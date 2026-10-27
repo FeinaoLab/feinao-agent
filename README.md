@@ -1,65 +1,188 @@
-# 飞脑AI Agent网关
+# FeiNao — an audit-first agent gateway
 
-> 一个入口 · 智达全系
+[![CI](https://github.com/dukema81/feinao-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/dukema81/feinao-agent/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
+[![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)](#5-zero-dependencies-is-a-design-constraint-not-a-shortcut)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-飞系全系 52 个项目的 AI Agent 统一网关（第 52 号项目）：零依赖（Python 标准库 + SQLite FTS5）。
+> Most agent demos show you what the model **said**.
+> This one shows you what actually **happened** — and who **approved** it.
 
-## 核心能力
-- **LLM 多供应商网关**：DeepSeek / 混元 / mock 兜底，按序降级重试（combo 链），用量落库（usage 表）；Key 支持环境变量与 `.env` 文件，无 Key 自动降级 mock
-- **供应商体检**：`GET /api/providers/health[?ping=1]` —— 只回 `hasKey` / `fingerprint`（末四位）/ `key_len`，**任何响应都不出现完整 Key**；ping=1 时真发一次最小请求验证有效性与延迟，错误信息过一遍脱敏
-- **试点1 · 知识问答（RAG）**：SQLite FTS5 检索（LIKE 兜底）+ 带引用回答
-- **试点2 · 智能查数（NL2API）**：自然语言 → 实体匹配（spec 驱动）→ 上游 REST 查询 → LLM 总结；不生成裸 SQL，天然防注入
-- **试点3 · 客服话术**：场景 → 五段式话术生成（可挂知识库参考）
-- **L2 ReAct Agent**：工具注册表（search_docs / query_system）+ 步数上限
-- **LCM 无损上下文（长期会话）**：原文全量落库 + 分块摘要 + 摘要上卷成 DAG + 关键词回溯原文；上下文受 token 预算约束，历史再长也不膨胀
-- **验证型收尾要求（VERIFY_TAIL）**：所有面向用户的回答（rag / react / LCM / 兼容链路）系统提示强制要求「结论附依据、产出物给位置、未验证要标注」——完成必须是可验证产物，不是模型自述；有测试守卫（tests/test_provider.py）
-- **证据链（v1.3）**：每次回答落 `evidence` 表——真实命中的文档/回溯轮次、工具调用链、上下文规模、是否标注未验证；由代码记录"实际发生了什么"，与模型自述互相独立。接口 `GET /api/evidence?conv_id=N`
-- **动作级权限/预算（v1.3）**：`spec.json` 的 `tool_policies` 按动作声明 `roles` / `max_calls_per_run` / `requires_confirm`，ReAct 强制执行；拒绝不静默，原因喂回模型并落 `denied` 步骤
-- **任务进度落库（v1.3）**：`tasks` + `task_steps`（tool_call / tool_result / denied / pending / error / answer / replay），步数耗尽保持 `active` 可 `task_id` 断点续跑；接口 `GET /api/tasks`、`GET /api/tasks/detail?id=N`
-- **飞审审批工作台（v1.4）**：`requires_confirm` 的真闸门——写操作自动挂审批单（工具/参数/发起人/任务目标），人工「放行并执行」后系统真执行该动作并让任务自动续跑，拒绝则动作不执行、理由回给模型；重复提交防扰 + 幂等回放；接口 `GET /api/approvals`、`POST /api/approvals/decide`（详见 `docs/飞审审批工作台-上线说明.md`）
-- **飞忆跨会话长期记忆（v1.5）**：Harness 第 1 层收口——从会话抽取事实/决定/偏好/产出物，默认待确认、人工点头才生效；新会话按关键词检索注入（带 M#编号/日期/来源会话），命中不到不注入；三道过滤（反虚构 grounding、过程噪声、去重+新值取代旧值）；接口 `GET /api/memory`、`POST /api/memory/decide`、`POST /api/memory/extract`（详见 `docs/飞忆跨会话记忆-上线说明.md`）
-- **审计与配额**：全工具/LLM 调用写 audit；viewer 无审计权限
+A self-contained Agent gateway in ~2,500 lines of Python: **standard library + SQLite only**.
+No framework, no vector DB, no `pip install`. Clone it, run one command, and you get a working
+agent with citations, an evidence log, per-action permissions, a human approval gate,
+resumable task state, and cross-session memory.
 
-## 运行
 ```bash
-cd backend
-python server.py          # http://127.0.0.1:8060/ ，手机 /m/
-# 三角色: admin/admin123 · ops01/ops123456 · view01/view123456
-# LLM Key（可选，缺省走 mock）:
-#   FEINAO_DEEPSEEK_KEY / FEINAO_HUNYUAN_KEY
+git clone https://github.com/dukema81/feinao-agent.git && cd feinao-agent
+python backend/server.py
+# open http://127.0.0.1:8060/  →  admin / admin123
 ```
 
-## LCM 无损上下文（已接线上）
-对话主链路已默认走 LCM：前端只发本轮文本 + `conv_id`，历史摘要、热区原文、回溯片段都在服务端组装，会话记忆不再依赖前端回传全量 messages（旧 `{messages}` 调用保持兼容）。
-```bash
-python tools/lcm_compare.py      # 对照实验：常规截断 vs LCM vs LCM+回溯
+No API key needed: it falls back to a deterministic mock LLM and a built-in fake upstream, so
+every screen works on first boot. Add a key to `.env` when you want real answers.
+(中文说明见 [README.zh-CN.md](README.zh-CN.md))
+
+---
+
+## The problem this repo addresses
+
+Every team shipping an agent hits the same wall, and it is never the model:
+
+| What breaks in production | What this repo does about it |
+| --- | --- |
+| "The agent said it saved the file." — it didn't. | `VERIFY_TAIL` forces every answer to state its basis; the `evidence` table records what the code observed, independent of the model's self-report. |
+| "Who authorized that write?" | `tool_policies` declares roles / call budgets / `requires_confirm` per action. Write actions park in an approval queue and **do not execute** until a human approves. |
+| "The run died at step 4, start over." | `tasks` + `task_steps` persist every tool call, denial and answer; resume with `task_id`. |
+| "It forgot what we agreed on last week." | Cross-session memory extracts facts/decisions, defaults to **pending**, injects only after a human activates them. |
+| "Context exploded after 100 turns." | LCM: full text in SQLite, summaries rolled up into a DAG, keyword retrieval back to the original passage. |
+
+## What's actually different
+
+**1. Evidence is code-recorded, not model-claimed.**
+Every response writes an `evidence` row: which documents really matched, which tool calls really
+ran, context size, whether the answer was flagged unverified. `GET /api/evidence` returns it.
+You can diff that against what the model told the user.
+
+**2. The approval gate is a real gate.**
+This is the part most "human-in-the-loop" demos fake. When a write-class tool is requested:
+
 ```
-实测结果（详见 `docs/lcm-原型验证报告.md`）：
-- 42 轮会话、考早期事实：常规"只留最近 6 轮"命中 **0/8**，LCM **8/8**
-- 上下文压到 161 token 的极端预算：只给摘要 0/8，**加上原文回溯 8/8**
-- 历史拉长到 162 轮：原始 4621 token → 实际喂模型 1283 token（省 **72%**）
-
-接口：
-- `POST /api/chat {text, conv_id?}` —— 线上对话主链路（LCM）
-- `GET /api/lcm_convs` —— 会话列表（带轮次与最后一句）
-- `GET /api/lcm?conv_id=` —— 库结构统计与摘要节点（DAG 视图）
-- `POST /api/ai/lcm {text, conv_id?}` —— LCM 直连（含完整 stats）
-- `POST /api/ai/lcm_detail {conv_id, q}` —— 回溯原文
-
-## 测试
-```bash
-python -m pytest tests/ -q     # 11 项：API 全链路 + LCM + 供应商真实链路
+model asks for ingest_doc
+  → policy says requires_confirm
+  → approval row created (tool, args, requester, task goal)
+  → task status = waiting_approval, run returns
+  → human POST /api/approvals/decide {decision:"approved"}
+  → the action executes for real, then the task auto-continues
 ```
 
-## 目录
-- backend/  engine.py（HTTP）+ ai.py（网关/RAG/试点/ReAct）+ lcm.py（无损上下文）+ spec.json
-- frontend/ 对话工作台 SPA（对话 + 三试点 + 审计看板）
-- mobile/   PWA（对话 + 模式切换：知识问答/智能查数/客服话术）
-- tests/    API 集成测试（真实起服全链路）+ LCM 单元/接口测试 + 供应商真实链路（本地 OpenAI 协议桩）
-- docs/     建设方案 + LCM 原型验证报告
-- tools/    Logo + UI 巡检 + LCM 对照实验脚本
+Reject it and the action never runs; the refusal reason is fed back to the model. Re-submitting
+the same rejected action does not create a new ticket (anti-nagging), and approving twice replays
+the cached result instead of writing twice (idempotent replay).
 
-## 生产部署
-systemd（8060）+ nginx /nao/（桌面）与 /nao/m/（手机），已上线运行。
+**3. Long context with receipts.**
+LCM was measured, not asserted — see `docs/lcm-原型验证报告.md` and `tools/lcm_compare.py`:
 
-真实 Key 已上线（2026-10-27，阿里云百炼 qwen-flash）：Key 在 `/opt/feinao-agent/.env`（参考 `.env.example`），改 Key/换模型后 `systemctl restart fei-feinao-agent` 即生效，无需改代码；全缺时自动 mock 兜底。
+| Scenario | Truncation | LCM |
+| --- | --- | --- |
+| 42 turns, recall an early fact | 0/8 | **8/8** |
+| 161-token context budget | 0/8 (summary only) | **8/8** (summary + original-text retrieval) |
+| 162 turns | 4,621 tokens | **1,283 tokens (−72%)** |
+
+**4. Memory that asks first.**
+Extraction runs three filters: grounding (every number must appear verbatim in the source),
+process-noise rejection ("noted / synced / context" style chatter), and dedup with
+new-value-supersedes-old. Candidates land in `pending`; nothing reaches the prompt until a human
+clicks activate. `auto_activate_min` defaults to 1.0, i.e. off.
+
+**5. Zero dependencies is a design constraint, not a shortcut.**
+`git clone && python backend/server.py` works on a fresh machine with no network, which is what
+makes this readable and auditable. You can read `ai.py` (1,000 lines) in one sitting and know
+exactly what your agent is allowed to do. That is the whole point.
+
+## Feature map
+
+| Area | Endpoint | Notes |
+| --- | --- | --- |
+| Chat (LCM) | `POST /api/chat` | Server-side context assembly; client sends only text + `conv_id` |
+| Knowledge Q&A | `POST /api/ai/ask` | FTS5 retrieval, answers carry `[DOC n]` citations |
+| NL → data | `POST /api/ai/nl2api` | Entity matching from a spec, calls a REST API — never generates raw SQL |
+| Support script | `POST /api/ai/script` | Five-section reply draft, grounded on the KB |
+| ReAct agent | `POST /api/ai/react` | Tool registry, step budget, resumable by `task_id` |
+| Approvals | `GET/POST /api/approvals[/decide]` | Execute-on-approve, TTL, idempotent replay |
+| Memory | `GET /api/memory`, `POST /api/memory/{decide,extract}` | Pending-first, human activation |
+| Evidence | `GET /api/evidence?conv_id=` | Code-recorded ground truth |
+| Tasks | `GET /api/tasks[/detail]` | Step timeline including denials |
+| Providers | `GET /api/providers/health?ping=1` | Never returns a full key — only `hasKey` / last-4 / length |
+| Audit | `GET /api/audit` | Every tool + LLM call; `viewer` is denied |
+
+Roles out of the box: `admin` / `ops01` / `view01` (admin, ops, viewer).
+
+## Architecture
+
+```
+                     ┌──────────────────────────────┐
+  browser / PWA ────►│ engine.py  (HTTP, stdlib)    │
+                     │  static + /api/* + roles     │
+                     └───────┬──────────────┬───────┘
+                             │              │
+                    ┌────────▼───────┐  ┌───▼────────────────────┐
+                    │ ai.py          │  │ lcm.py     memory.py   │
+                    │ provider chain │  │ context    cross-session│
+                    │ RAG / ReAct    │  │ DAG +      extract /   │
+                    │ policy+approve │  │ retrieve   grounding   │
+                    └────────┬───────┘  └───┬────────────────────┘
+                             │              │
+                     ┌───────▼──────────────▼───────┐
+                     │      feinao.db (SQLite)      │
+                     │ docs·evidence·tasks·steps    │
+                     │ approvals·memory·audit·usage │
+                     └──────────┬───────────────────┘
+                                │ spec.json drives providers,
+                                │ policies, roles, upstreams
+                     ┌──────────▼───────────────────┐
+                     │ upstreams: KMS · BI · tickets │
+                     │ demo mode substitutes a       │
+                     │ built-in fake on :8099        │
+                     └───────────────────────────────┘
+```
+
+## Demo mode vs. real upstreams
+
+By default `FEINAO_DEMO=1`, which:
+
+- serves a deterministic fake upstream on `:8099` (login / spec / rows — same contract as the real thing)
+- seeds 9 knowledge documents so RAG has something to cite
+- says so in the startup banner
+
+Point it at your own systems with `FEINAO_DEMO=0` plus:
+
+```bash
+FEINAO_UPSTREAM_KMS=http://your-kms:8050/kms/
+FEINAO_UPSTREAM_BI=http://your-bi:8041/bi/
+FEINAO_UPSTREAM_CC=http://your-desk:8043/cc/
+```
+
+An upstream only needs three endpoints:
+
+```
+POST api/login   {username,password} → {token}
+GET  api/spec    → {entities:[{key,label,desc}]}
+GET  api/<entity>?limit=20&q=keyword → {rows:[...], total:N}
+```
+
+## Tests
+
+```bash
+python -m pytest tests/ -q      # 38 passed
+```
+
+Covers the full HTTP chain (real server, mock LLM), LCM recall, the approval lifecycle, memory
+extraction and grounding, and the demo upstream contract. CI runs it on Python 3.9 / 3.11 / 3.13,
+plus a clone-and-run smoke test that installs **nothing**.
+
+## Read before deploying
+
+This is a reference implementation, not a hardened product. At minimum:
+
+1. Change the factory passwords — the server prints `[warn] default password in use` if you don't.
+2. Don't expose `:8060` directly; put TLS and access control in front of it.
+3. Set `FEINAO_DEMO=0`, otherwise your real upstreams are never called.
+
+Details and known trade-offs: [SECURITY.md](SECURITY.md).
+
+## Docs
+
+- [docs/建设方案.md](docs/建设方案.md) — design and scope
+- [docs/lcm-原型验证报告.md](docs/lcm-原型验证报告.md) — the LCM experiment, with numbers
+- [docs/证据链-权限预算-任务状态-上线说明.md](docs/证据链-权限预算-任务状态-上线说明.md)
+- [docs/飞审审批工作台-上线说明.md](docs/飞审审批工作台-上线说明.md) — the approval gate
+- [docs/飞忆跨会话记忆-上线说明.md](docs/飞忆跨会话记忆-上线说明.md) — cross-session memory
+
+## Contributing
+
+Small, focused changes with tests are very welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
+One rule: new behavior needs a test that proves it, because the whole point of this repo is that
+"it works" should be checkable.
+
+MIT licensed.

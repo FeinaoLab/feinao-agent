@@ -48,6 +48,16 @@ def _load_env_file():
 
 _load_env_file()
 
+# 演示口令可用环境变量覆盖（FEINAO_PASS_ADMIN / FEINAO_PASS_OPS01 / ...），
+# 免得把真口令写进 spec.json。仅对新建库生效，已有库请直接改 users 表。
+for _u in list(SPEC["users"]):
+    _v = os.environ.get("FEINAO_PASS_" + _u.upper())
+    if _v:
+        SPEC["users"][_u] = _v
+
+# 出厂口令，只用于本地演示；对外暴露前必须替换。
+DEFAULT_PASSWORDS = {"admin123", "ops123456", "view123456"}
+
 
 def db():
     conn = sqlite3.connect(DB_PATH)
@@ -510,7 +520,16 @@ def _call_mock(messages, **kw):
             kw_hit[0] if kw_hit else "", "orders")
         return json.dumps({"entity": ent, "q": "", "limit": 20}, ensure_ascii=False)
     if "[PILOT:rag]" in sys_txt:
-        return "根据知识库资料：%s（mock 摘要回答，已检索 %s 条相关文档）" % (user_txt[:60], sys_txt.count("[DOC]"))
+        # 没有真 Key 时也必须是"可核对"的回答：说清依据了几条、依据哪几篇，
+        # 命中不到就直说不知道 —— mock 也不能编。
+        titles = re.findall(r"\[DOC\d+\]\s*([^\n]+)", sys_txt)
+        if not titles:
+            return "（知识库未命中相关文档，不做推测回答；请先入库或换个问法）"
+        body = sys_txt.split("\n", 1)[1] if "\n" in sys_txt else sys_txt
+        body = re.sub(r"\[DOC\d+\][^\n]*", " ", body)   # 去掉标题行，只留正文
+        snippet = " ".join(body.split())[:150]
+        return "依据 %d 条文档回答：%s。原文要点：%s ……（mock 摘要，填入 LLM Key 后由模型生成）" % (
+            len(titles), "、".join("《%s》" % t.strip() for t in titles), snippet)
     if "[PILOT:script]" in sys_txt:
         return ("【话术-开场】您好，欢迎光临，我是您的专属顾问。\n"
                 "【话术-推荐】根据您的需求，为您推荐以下方案：\n"
@@ -603,17 +622,41 @@ def providers_health(ping=False):
 _tok_cache = {}
 
 
+def demo_enabled():
+    """内置假上游开关：FEINAO_DEMO 优先，其次 spec.demo.default。
+
+    开源版默认开启，保证 clone 后不改任何配置就能跑通三个试点；
+    生产部署在 .env 里写 FEINAO_DEMO=0 即走 spec.json 里真实的 base。
+    """
+    v = os.environ.get("FEINAO_DEMO")
+    if v is not None:
+        return v.strip().lower() not in ("0", "false", "no", "off", "")
+    return bool((SPEC.get("demo") or {}).get("default"))
+
+
+def _upstream_base(name):
+    """上游基地址：FEINAO_UPSTREAM_<NAME> 环境变量 > demo_base（演示模式）> base。"""
+    over = os.environ.get("FEINAO_UPSTREAM_" + name.upper())
+    if over:
+        return over if over.endswith("/") else over + "/"
+    up = SPEC["upstreams"][name]
+    if demo_enabled() and up.get("demo_base"):
+        return up["demo_base"]
+    return up["base"]
+
+
 def _upstream_get(name, path):
     up = SPEC["upstreams"][name]
+    base = _upstream_base(name)
     tok = _tok_cache.get(name)
     if not tok:
         body = json.dumps({"username": up["user"], "password": up["pass"]}).encode()
-        req = urllib.request.Request(up["base"] + "api/login", data=body, method="POST")
+        req = urllib.request.Request(base + "api/login", data=body, method="POST")
         req.add_header("Content-Type", "application/json")
         with urllib.request.urlopen(req, timeout=10) as r:
             tok = json.loads(r.read().decode())["token"]
         _tok_cache[name] = tok
-    req = urllib.request.Request(up["base"] + path)
+    req = urllib.request.Request(base + path)
     req.add_header("Authorization", "Bearer " + tok)
     try:
         with urllib.request.urlopen(req, timeout=15) as r:

@@ -1,4 +1,12 @@
 __pycache__/
+*.py[cod]
 *.db
 *.db-*
+.pytest_cache/
+.env
+.venv/
+venv/
 tools/shots/
+# 部署通道残留（多机同步时产生的 base64 中转文件，不入库）
+*.b64
+.DS_Store

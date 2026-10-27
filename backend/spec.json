@@ -17,9 +17,14 @@
     {"name": "mock", "type": "mock"}
   ],
   "upstreams": {
-    "kms": {"label": "飞知KMS", "base": "http://127.0.0.1:8050/kms/", "user": "admin", "pass": "admin123"},
-    "bi": {"label": "飞瞰BI", "base": "http://127.0.0.1:8041/bi/", "user": "admin", "pass": "admin123"},
-    "cc": {"label": "飞音客服", "base": "http://127.0.0.1:8043/cc/", "user": "admin", "pass": "admin123"}
+    "kms": {"label": "飞知KMS", "base": "http://127.0.0.1:8050/kms/", "demo_base": "http://127.0.0.1:8099/kms/", "user": "admin", "pass": "admin123"},
+    "bi": {"label": "飞瞰BI", "base": "http://127.0.0.1:8041/bi/", "demo_base": "http://127.0.0.1:8099/bi/", "user": "admin", "pass": "admin123"},
+    "cc": {"label": "飞音客服", "base": "http://127.0.0.1:8043/cc/", "demo_base": "http://127.0.0.1:8099/cc/", "user": "admin", "pass": "admin123"}
+  },
+  "demo": {
+    "default": true,
+    "upstream_port": 8099,
+    "seed_docs": true
   },
   "pilots": {
     "rag_topk": 5,

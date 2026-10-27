@@ -1,0 +1,6 @@
+# 统一行尾：仓库内一律 LF，检出到 Windows 也不转换，避免 diff 噪音
+* text=auto eol=lf
+
+*.png binary
+*.ico binary
+*.jpg binary

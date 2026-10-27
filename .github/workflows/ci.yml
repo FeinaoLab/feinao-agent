@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11", "3.13"]
+
+    env:
+      # 测试必须走 mock 供应商，避免 CI 依赖外部 Key、也避免花钱
+      FEINAO_QWEN_KEY: ""
+      FEINAO_DEEPSEEK_KEY: ""
+      FEINAO_HUNYUAN_KEY: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Show interpreter
+        run: python -V
+
+      - name: Install test runner
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Unit + integration tests
+        run: python -m pytest tests/ -q
+
+  smoke:
+    name: clone-and-run smoke test
+    runs-on: ubuntu-latest
+
+    env:
+      FEINAO_QWEN_KEY: ""
+      FEINAO_DEEPSEEK_KEY: ""
+      FEINAO_HUNYUAN_KEY: ""
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # 这里刻意不装任何依赖：零依赖是这个项目的主张，CI 必须证明它成立
+      - name: Start gateway (stdlib only)
+        run: |
+          cd backend
+          python -u server.py > /tmp/server.log 2>&1 &
+          for i in $(seq 1 40); do
+            sleep 0.5
+            if curl -sf http://127.0.0.1:8060/api/health > /dev/null; then break; fi
+          done
+          cat /tmp/server.log
+
+      - name: Health check
+        run: curl -sf http://127.0.0.1:8060/api/health | tee /tmp/health.json
+
+      - name: Demo upstream is live and login works
+        run: |
+          TOKEN=$(curl -sf -X POST http://127.0.0.1:8099/bi/api/login \
+            -H 'Content-Type: application/json' \
+            -d '{"username":"admin","password":"admin123"}' \
+            | python -c "import sys,json;print(json.load(sys.stdin)['token'])")
+          test -n "$TOKEN"
+          curl -sf http://127.0.0.1:8099/bi/api/spec -H "Authorization: Bearer $TOKEN"
+
+      - name: Seeded knowledge base answers with a citation
+        run: |
+          TOKEN=$(curl -sf -X POST http://127.0.0.1:8060/api/login \
+            -H 'Content-Type: application/json' \
+            -d '{"username":"admin","password":"admin123"}' \
+            | python -c "import sys,json;print(json.load(sys.stdin)['token'])")
+          curl -sf -X POST http://127.0.0.1:8060/api/ai/ask \
+            -H "Authorization: Bearer $TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d '{"q":"住宿报销标准是多少"}' | tee /tmp/ask.json
+          python - <<'PY'
+          import json
+          d = json.load(open("/tmp/ask.json"))
+          assert d.get("sources"), "expected at least one cited document"
+          print("cited:", [s["title"] for s in d["sources"]])
+          PY
+
+      - name: Dump server log on failure
+        if: failure()
+        run: cat /tmp/server.log

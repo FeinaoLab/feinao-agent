@@ -420,10 +420,27 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(500, {"error": str(e)[:200]})
 
 
+def _startup_notes():
+    """启动横幅：说清楚当前是演示模式还是真上游，以及口令风险。"""
+    if ai.demo_enabled():
+        import demo
+        port = demo.start_upstream((SPEC.get("demo") or {}).get("upstream_port"))
+        seeded = demo.seed_docs() if (SPEC.get("demo") or {}).get("seed_docs", True) else 0
+        print("[demo] stand-in upstream on 127.0.0.1:%d (KMS/BI/CC)" % port)
+        if seeded:
+            print("[demo] seeded %d knowledge documents" % seeded)
+        print("[demo] set FEINAO_DEMO=0 to talk to the real systems in spec.json")
+    weak = sorted(u for u, p in SPEC["users"].items() if p in ai.DEFAULT_PASSWORDS)
+    if weak:
+        print("[warn] default password in use for: %s — change before exposing this port"
+              % ", ".join(weak))
+
+
 def run():
     ai.init_db()
     lcm.init_lcm_db()
     memory.init_memory_db()
+    _startup_notes()
     port = int(os.environ.get("FEINAO_PORT", SPEC["brand"]["port"]))
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print("FeiNao %s on :%d" % (SPEC["brand"]["full"], port))
