@@ -268,11 +268,15 @@ def approval_get(aid):
 
 
 def _expire_stale():
-    """超时的待审批单自动置 expired——挂着不处理也是一种决定。"""
+    """超时的待审批单自动置 expired——挂着不处理也是一种决定。
+
+    用 `created <= cutoff`：ttl_minutes=0 表示"立刻过期"，必须覆盖同一秒内
+    创建的单（用严格小于时，快速机器上创建与判过期落在同一秒会漏判）。
+    """
     ttl = approval_policy()["ttl_minutes"]
     cutoff = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - ttl * 60))
     conn = db()
-    n = conn.execute("UPDATE approvals SET status='expired' WHERE status='pending' AND created<?",
+    n = conn.execute("UPDATE approvals SET status='expired' WHERE status='pending' AND created<=?",
                      (cutoff,)).rowcount
     conn.commit()
     conn.close()
