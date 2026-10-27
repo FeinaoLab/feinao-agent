@@ -14,7 +14,114 @@ import urllib.error
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 SPEC_PATH = os.environ.get("FEINAO_SPEC") or os.path.join(BASE, "spec.json")
-SPEC = json.load(io.open(SPEC_PATH, encoding="utf-8"))
+
+
+class SpecError(RuntimeError):
+    """spec.json 不符合约定。启动阶段抛出 = 拒绝启动：配置坏了宁可不上线，也别带病跑。"""
+
+
+# 启动必需段。缺了系统根本跑不起来，必须指名道姓报错，而不是跑到一半 KeyError。
+SPEC_REQUIRED = {"brand": dict, "users": dict, "upstreams": dict,
+                 "pilots": dict, "approval": dict, "tool_policies": dict}
+
+DEFAULT_MODES = {
+    "default": "default",
+    "definitions": {
+        "plan":    {"read": "allow", "write": "suspend", "dangerous": "deny"},
+        "default": {"read": "allow", "write": "confirm", "dangerous": "confirm"},
+        "auto":    {"read": "allow", "write": "confirm", "dangerous": "confirm"},
+        "yolo":    {"read": "allow", "write": "allow", "dangerous": "allow"},
+    },
+    "yolo_allowed_roles": [],
+}
+DEFAULT_LIMITS = {"max_steps": 20, "max_wall_clock_seconds": 600,
+                  "same_call_repeat_limit": 3, "malformed_json_limit": 2}
+DEFAULT_EGRESS = {"enabled": False, "allow_schemes": ["http", "https"], "allow_domains": [],
+                  "allow_ports": [80, 443], "trust_upstream_origins": True,
+                  "deny_private_networks": True, "deny_metadata_endpoints": True,
+                  "max_response_bytes": 5242880, "request_timeout_seconds": 15}
+MODE_ACTIONS = ("allow", "confirm", "suspend", "deny")
+TOOL_CLASSES = ("read", "write", "dangerous")
+
+
+def _copy(o):
+    return json.loads(json.dumps(o))
+
+
+def _merge(base, over):
+    """深合并：over 覆盖 base，dict 逐键递归，其余整体替换。"""
+    if not isinstance(over, dict) or not isinstance(base, dict):
+        return _copy(over)
+    out = _copy(base)
+    for k, v in over.items():
+        out[k] = _merge(base.get(k), v) if isinstance(v, dict) and isinstance(base.get(k), dict) else _copy(v)
+    return out
+
+
+def validate_spec(spec, path=None):
+    """结构校验：必需段、跨段引用、枚举取值。只查启动必需项，可选段由默认值兜底。"""
+    where = path or SPEC_PATH
+    if not isinstance(spec, dict):
+        raise SpecError("%s 顶层必须是对象，实际是 %s" % (where, type(spec).__name__))
+    for k, t in SPEC_REQUIRED.items():
+        if k not in spec:
+            raise SpecError("%s 缺少顶层段 %s" % (where, k))
+        if not isinstance(spec[k], t):
+            raise SpecError("%s 的 %s 应为 %s，实际是 %s" % (where, k, t.__name__, type(spec[k]).__name__))
+    if not spec["users"]:
+        raise SpecError("%s 的 users 为空：没有用户就没人能登录" % where)
+    if not spec["upstreams"]:
+        raise SpecError("%s 的 upstreams 为空：至少需要一个上游" % where)
+    for name, up in spec["upstreams"].items():
+        if not isinstance(up, dict) or not up.get("base"):
+            raise SpecError("%s 的 upstreams.%s 缺少 base" % (where, name))
+        if not str(up["base"]).startswith(("http://", "https://")):
+            raise SpecError("%s 的 upstreams.%s.base 必须是 http(s) 地址：%s" % (where, name, up["base"]))
+    for name, pol in (spec.get("tool_policies") or {}).items():
+        if not isinstance(pol, dict):
+            raise SpecError("%s 的 tool_policies.%s 必须是对象" % (where, name))
+        cls = pol.get("class")
+        if cls is not None and cls not in TOOL_CLASSES:
+            raise SpecError("%s 的 tool_policies.%s.class 只能是 %s，实际 %r"
+                            % (where, name, "/".join(TOOL_CLASSES), cls))
+    for m, defs in ((spec.get("modes") or {}).get("definitions") or {}).items():
+        if not isinstance(defs, dict):
+            raise SpecError("%s 的 modes.definitions.%s 必须是对象" % (where, m))
+        for cls in TOOL_CLASSES:
+            if cls not in defs:
+                raise SpecError("%s 的 modes.definitions.%s 缺 %s 动作" % (where, m, cls))
+            if defs[cls] not in MODE_ACTIONS:
+                raise SpecError("%s 的 modes.definitions.%s.%s 只能是 %s，实际 %r"
+                                % (where, m, cls, "/".join(MODE_ACTIONS), defs[cls]))
+    return True
+
+
+def apply_spec_defaults(spec):
+    """把可选段补齐成生效值。只补内存，不写磁盘——飞构的快照永远是文件原文。"""
+    spec["modes"] = _merge(DEFAULT_MODES, spec.get("modes") or {})
+    spec["limits"] = _merge(DEFAULT_LIMITS, spec.get("limits") or {})
+    spec["egress"] = _merge(DEFAULT_EGRESS, spec.get("egress") or {})
+    for name, pol in (spec.get("tool_policies") or {}).items():
+        # 没写 class 的老配置：以 requires_confirm 反推（要人工确认的多半是写操作）
+        pol.setdefault("class", "write" if pol.get("requires_confirm") else "read")
+        pol.setdefault("requires_confirm", pol["class"] in ("write", "dangerous"))
+        pol.setdefault("timeout_seconds", 15)
+        pol.setdefault("max_calls_per_run", 2)
+        pol.setdefault("roles", ["admin", "ops", "viewer"])
+    return spec
+
+
+def load_spec_text(text, path=None):
+    """从文本加载一份配置：先解析、再校验、最后补默认值。坏配置在这里就断掉。"""
+    try:
+        data = json.loads(text)
+    except ValueError as e:
+        raise SpecError("%s 不是合法 JSON：%s" % (path or SPEC_PATH, e))
+    validate_spec(data, path)
+    return apply_spec_defaults(data)
+
+
+SPEC = load_spec_text(io.open(SPEC_PATH, encoding="utf-8").read(), SPEC_PATH)
 DB_PATH = os.environ.get("FEINAO_DB", os.path.join(BASE, "feinao.db"))
 _lock_lock = True
 
@@ -191,12 +298,74 @@ def user_role(user):
 # ---------------- 动作级权限/预算（Harness 第 4 层） ----------------
 
 def tool_policy(name):
-    """spec.json tool_policies 声明的动作级策略；未声明的工具走保守默认。"""
+    """spec.json tool_policies 声明的动作级策略；未声明的工具走保守默认。
+
+    class 决定"模式闸门怎么放行"（read/write/dangerous），
+    requires_confirm 决定"要不要人工审批"，timeout_seconds 决定单次调用等多久。
+    """
     pol = (SPEC.get("tool_policies") or {}).get(name) or {}
+    cls = pol.get("class") or ("write" if pol.get("requires_confirm") else "read")
+    if cls not in TOOL_CLASSES:
+        cls = "write"  # 写不清类别时按最保守的处理
     return {
         "max_calls_per_run": int(pol.get("max_calls_per_run", 2)),
         "roles": pol.get("roles") or ["admin", "ops", "viewer"],
-        "requires_confirm": bool(pol.get("requires_confirm", False)),
+        "requires_confirm": bool(pol.get("requires_confirm", cls != "read")),
+        "class": cls,
+        "timeout_seconds": int(pol.get("timeout_seconds", 15)),
+    }
+
+
+def modes_policy():
+    m = SPEC.get("modes") or {}
+    return {"default": m.get("default") or "default",
+            "definitions": m.get("definitions") or _copy(DEFAULT_MODES["definitions"]),
+            "yolo_allowed_roles": m.get("yolo_allowed_roles") or []}
+
+
+def limits_policy():
+    l = SPEC.get("limits") or {}
+    return {"max_steps": int(l.get("max_steps", DEFAULT_LIMITS["max_steps"])),
+            "max_wall_clock_seconds": float(l.get("max_wall_clock_seconds",
+                                                  DEFAULT_LIMITS["max_wall_clock_seconds"])),
+            "same_call_repeat_limit": int(l.get("same_call_repeat_limit",
+                                                DEFAULT_LIMITS["same_call_repeat_limit"])),
+            "malformed_json_limit": int(l.get("malformed_json_limit",
+                                              DEFAULT_LIMITS["malformed_json_limit"]))}
+
+
+def egress_policy():
+    e = SPEC.get("egress") or {}
+    return {"enabled": bool(e.get("enabled", False)),
+            "allow_schemes": e.get("allow_schemes") or ["http", "https"],
+            "allow_domains": e.get("allow_domains") or [],
+            "allow_ports": [int(p) for p in (e.get("allow_ports") or [80, 443])],
+            "trust_upstream_origins": bool(e.get("trust_upstream_origins", True)),
+            "deny_private_networks": bool(e.get("deny_private_networks", True)),
+            "deny_metadata_endpoints": bool(e.get("deny_metadata_endpoints", True)),
+            "max_response_bytes": int(e.get("max_response_bytes", 5242880)),
+            "request_timeout_seconds": int(e.get("request_timeout_seconds", 15))}
+
+
+def policy_effective():
+    """对外可见的生效策略（排障用）。不含口令、Key、上游账号——只回结构与取值。"""
+    tools = {}
+    for name in TOOLS:
+        pol = tool_policy(name)
+        tools[name] = {"class": pol["class"], "roles": pol["roles"],
+                       "requires_confirm": pol["requires_confirm"],
+                       "max_calls_per_run": pol["max_calls_per_run"],
+                       "timeout_seconds": pol["timeout_seconds"]}
+    ap = approval_policy()
+    return {
+        "spec": {"file": os.path.basename(SPEC_PATH), "sha": spec_sha()},
+        "modes": modes_policy(),
+        "limits": limits_policy(),
+        "egress": egress_policy(),
+        "approval": {"name": ap["name"], "approvers": ap["approvers"],
+                     "allow_self": ap["allow_self"], "ttl_minutes": ap["ttl_minutes"]},
+        "tools": tools,
+        "upstreams": {k: v.get("label") for k, v in SPEC["upstreams"].items()},
     }
 
 
@@ -598,8 +767,11 @@ def harness_diff(a=None, b=None):
 
 
 def reload_spec(text=None):
-    """热加载 spec.json。原地更新 dict，让 engine.SPEC 等既有引用同步生效。"""
-    new = json.loads(text if text is not None else _spec_text())
+    """热加载 spec.json。原地更新 dict，让 engine.SPEC 等既有引用同步生效。
+
+    先校验再替换：坏配置不许进内存（飞构回滚也一样走这里）。
+    """
+    new = load_spec_text(text if text is not None else _spec_text(), SPEC_PATH)
     for u in list(new.get("users") or {}):
         v = os.environ.get("FEINAO_PASS_" + u.upper())
         if v:
@@ -620,9 +792,9 @@ def harness_activate(rid, by="admin"):
         return {"ok": False, "error": "修订 #%d 不存在" % rid}
     text = row["content"] or ""
     try:
-        json.loads(text)  # 脏数据不许上线：语法不对直接拒
-    except Exception as e:
-        return {"ok": False, "error": "修订内容不是合法 JSON：%s" % str(e)[:80]}
+        load_spec_text(text, "修订 #%d" % rid)  # 解析 + 结构校验：坏配置不许上线
+    except SpecError as e:
+        return {"ok": False, "error": str(e)[:200]}
     tmp = SPEC_PATH + ".tmp"
     with io.open(tmp, "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
@@ -827,18 +999,19 @@ def _upstream_base(name):
 def _upstream_get(name, path):
     up = SPEC["upstreams"][name]
     base = _upstream_base(name)
+    tmo = tool_policy("query_system")["timeout_seconds"]  # 超时也在配置里，不在代码里
     tok = _tok_cache.get(name)
     if not tok:
         body = json.dumps({"username": up["user"], "password": up["pass"]}).encode()
         req = urllib.request.Request(base + "api/login", data=body, method="POST")
         req.add_header("Content-Type", "application/json")
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=min(10, tmo)) as r:
             tok = json.loads(r.read().decode())["token"]
         _tok_cache[name] = tok
     req = urllib.request.Request(base + path)
     req.add_header("Authorization", "Bearer " + tok)
     try:
-        with urllib.request.urlopen(req, timeout=15) as r:
+        with urllib.request.urlopen(req, timeout=tmo) as r:
             return json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
         if e.code == 401:
@@ -1098,15 +1271,50 @@ def _react_system_prompt(trace):
             % (json.dumps({k: v["desc"] for k, v in TOOLS.items()}, ensure_ascii=False), VERIFY_TAIL))
 
 
+def _abort_text(reason, d, task_id):
+    """中断原因翻译成人话——用户看到的是能接的下一步，不是堆栈或错误码。"""
+    if reason == "wall_clock_timeout":
+        return ("这个任务已经跑了 %s 秒，超过 %s 秒上限，我先停下来。" % (d.get("elapsed"), d.get("limit")) +
+                "已完成的步骤都记在任务 #%d 里，可以缩小范围重跑，或直接看已有结果。" % task_id)
+    if reason == "repeated_identical_call":
+        return ("连续 %d 次调用 %s 且参数完全相同，已停止。可能是参数不对或数据不存在——"
+                "要不要换个查法？" % (int(d.get("count", 0)), d.get("tool") or "同一工具"))
+    return "任务已中止（%s）。" % reason
+
+
+def _abort_run(task_id, user, task, reason, detail, trace, provider, idx):
+    """卡死中断：落 evidence(outcome=aborted) + 人话返回。不抛异常，不留半截任务。"""
+    entry = {"aborted": reason}
+    entry.update(detail)
+    trace.append(entry)
+    task_step(task_id, idx, "aborted", json.dumps(entry, ensure_ascii=False))
+    task_finish(task_id, "aborted")
+    msg = _abort_text(reason, detail, task_id)
+    eid = evidence_log(user, "react", None, task, msg, provider,
+                       sources=[s.get("tool") for s in trace if isinstance(s, dict) and s.get("tool")],
+                       trace=trace,
+                       context_tokens=sum(len(json.dumps(s, ensure_ascii=False)) for s in trace))
+    audit_log(user, "react_abort", {"task": task, "task_id": task_id, "reason": reason},
+              json.dumps(detail, ensure_ascii=False)[:200], False)
+    return {"answer": msg + "（中断原因与现场已记录，证据 #%d）" % eid, "status": "aborted",
+            "reason": reason, "task_id": task_id, "steps": trace,
+            "provider": provider, "evidence_id": eid}
+
+
 def react_run(task, user="admin", task_id=None, max_steps=None):
     """ReAct 多步任务：每一步落 task_steps（State 层），工具调用过动作级权限/预算
     （Permission 层），结束后把证据落 evidence 表（Verification 层）。
 
     task_id 传入且该任务属于此用户且状态 active 时，从上次的步骤继续跑（断点续跑）。
+    三条卡死上限来自 spec.limits：墙钟、三连相同调用、连续畸形输出——只增加判断，不改循环结构。
     """
-    max_steps = max_steps or SPEC["pilots"]["react_max_steps"]
+    lim = limits_policy()
+    # spec.limits.max_steps 是硬上限，pilots.react_max_steps 是常规步数：取小的那个
+    max_steps = min(int(max_steps or SPEC["pilots"]["react_max_steps"]), lim["max_steps"])
     trace = []
     used_counts = {}
+    task_start = time.time()
+    last_sig, same_count, malformed_count = None, 0, 0
     if task_id:
         t = task_get(task_id, user)
         if not t:
@@ -1131,6 +1339,12 @@ def react_run(task, user="admin", task_id=None, max_steps=None):
     provider = "-"
     answer = None
     for step in range(max_steps):
+        spent = time.time() - task_start
+        if spent > lim["max_wall_clock_seconds"]:
+            # 卡在慢接口上半小时，和步数超了不是一回事
+            return _abort_run(task_id, user, task, "wall_clock_timeout",
+                              {"elapsed": round(spent, 1), "limit": lim["max_wall_clock_seconds"]},
+                              trace, provider, idx)
         raw, provider = llm_chat([
             {"role": "system", "content": _react_system_prompt(trace)},
             {"role": "user", "content": "任务：%s\n已执行：%s" % (task, json.dumps(trace, ensure_ascii=False)[:1500])},
@@ -1143,6 +1357,23 @@ def react_run(task, user="admin", task_id=None, max_steps=None):
             break
         try:
             call = json.loads(m.group(0))
+        except Exception as e:
+            malformed_count += 1
+            if malformed_count >= lim["malformed_json_limit"]:
+                # 连着吐坏格式，再问也没用：降级成纯文本，把模型原话交给用户
+                answer = raw + "\n\n（模型连续 %d 次输出的调用格式无法解析，已降级为纯文本回答）" % malformed_count
+                entry = {"degraded": "malformed_json", "count": malformed_count}
+                trace.append(entry)
+                task_step(task_id, idx, "degraded", json.dumps(entry, ensure_ascii=False))
+                idx += 1
+                break
+            entry = {"error": "unparsable_tool_call", "count": malformed_count, "detail": str(e)[:120]}
+            trace.append(entry)
+            task_step(task_id, idx, "error", json.dumps(entry, ensure_ascii=False))
+            idx += 1
+            continue
+        malformed_count = 0
+        try:
             tool = TOOLS.get(call["tool"])
             if not tool:
                 raise ValueError("unknown tool " + call["tool"])
@@ -1196,6 +1427,15 @@ def react_run(task, user="admin", task_id=None, max_steps=None):
                 task_step(task_id, idx, "denied", json.dumps(entry, ensure_ascii=False))
                 idx += 1
                 continue
+            # 同一动作同一参数反复来，就是卡住了。放在权限/预算之后判断：
+            # 被拒绝或被预算挡住的动作不算"重复执行"，否则会把正常的拒绝路径误判成卡死。
+            sig = (call.get("tool"), json.dumps(call.get("args", {}), sort_keys=True, ensure_ascii=False))
+            same_count = same_count + 1 if sig == last_sig else 1
+            last_sig = sig
+            if same_count >= lim["same_call_repeat_limit"]:
+                return _abort_run(task_id, user, task, "repeated_identical_call",
+                                  {"tool": call.get("tool"), "count": same_count},
+                                  trace, provider, idx)
             used_counts[call["tool"]] = used_counts.get(call["tool"], 0) + 1
             task_step(task_id, idx, "tool_call", json.dumps(
                 {"tool": call["tool"], "args": call.get("args", {})}, ensure_ascii=False))

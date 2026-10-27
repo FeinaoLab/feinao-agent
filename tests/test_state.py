@@ -24,9 +24,17 @@ ai.init_db()
 
 
 def test_budget_denial():
-    """search_docs 预算 3 次/任务：模型连续要调第 4 次必须被拒（本地工具，不依赖上游）。"""
+    """search_docs 预算 3 次/任务：模型连续要调第 4 次必须被拒（本地工具，不依赖上游）。
+
+    每次查询词不同：这里要测的是"预算"，不是"同一动作重复"。
+    参数完全相同的第 3 次会被 spec.limits.same_call_repeat_limit 判定卡死并中止（见 test_limits.py），
+    那是另一条防线，别把两条混在一条用例里。
+    """
+    n = [0]
+
     def fake_llm(messages, user="system"):
-        return json.dumps({"tool": "search_docs", "args": {"q": "部署"}}), "stub"
+        n[0] += 1
+        return json.dumps({"tool": "search_docs", "args": {"q": "部署%d" % n[0]}}), "stub"
     ai.llm_chat = fake_llm
     r = ai.react_run("连续查库压测", user="admin")
     assert r.get("task_id"), "应生成任务"

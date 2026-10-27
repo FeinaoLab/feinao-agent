@@ -31,6 +31,33 @@
     "nl2api_max_rows": 50,
     "react_max_steps": 6
   },
+  "modes": {
+    "default": "default",
+    "definitions": {
+      "plan":    {"read": "allow", "write": "suspend", "dangerous": "deny"},
+      "default": {"read": "allow", "write": "confirm", "dangerous": "confirm"},
+      "auto":    {"read": "allow", "write": "confirm", "dangerous": "confirm"},
+      "yolo":    {"read": "allow", "write": "allow",   "dangerous": "allow"}
+    },
+    "yolo_allowed_roles": []
+  },
+  "limits": {
+    "max_steps": 20,
+    "max_wall_clock_seconds": 600,
+    "same_call_repeat_limit": 3,
+    "malformed_json_limit": 2
+  },
+  "egress": {
+    "enabled": false,
+    "allow_schemes": ["http", "https"],
+    "allow_domains": [],
+    "allow_ports": [80, 443],
+    "trust_upstream_origins": true,
+    "deny_private_networks": true,
+    "deny_metadata_endpoints": true,
+    "max_response_bytes": 5242880,
+    "request_timeout_seconds": 15
+  },
   "approval": {
     "name": "飞审审批工作台",
     "approvers": ["admin"],
@@ -45,8 +72,8 @@
     "max_text": 140
   },
   "tool_policies": {
-    "search_docs": {"max_calls_per_run": 3, "roles": ["admin", "ops", "viewer"], "requires_confirm": false},
-    "query_system": {"max_calls_per_run": 2, "roles": ["admin", "ops"], "requires_confirm": false},
-    "ingest_doc": {"max_calls_per_run": 1, "roles": ["admin", "ops"], "requires_confirm": true}
+    "search_docs": {"class": "read", "max_calls_per_run": 3, "roles": ["admin", "ops", "viewer"], "requires_confirm": false, "timeout_seconds": 10},
+    "query_system": {"class": "read", "max_calls_per_run": 2, "roles": ["admin", "ops"], "requires_confirm": false, "timeout_seconds": 15},
+    "ingest_doc": {"class": "write", "max_calls_per_run": 1, "roles": ["admin", "ops"], "requires_confirm": true, "timeout_seconds": 30}
   }
 }

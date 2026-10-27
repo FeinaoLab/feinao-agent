@@ -121,6 +121,12 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(401, {"error": "请先登录"})
                 ping = (qs.get("ping", ["0"])[0] in ("1", "true", "yes"))
                 return self._json(200, ai.providers_health(ping=ping))
+            if parts[1:3] == ["ai", "policy"]:
+                # GET /api/ai/policy —— 当前生效策略（脱敏），排障时看清楚"到底按哪套规则在跑"
+                me = _auth(self)
+                if not me:
+                    return self._json(401, {"error": "请先登录"})
+                return self._json(200, ai.policy_effective())
             if len(parts) == 2 and parts[1] == "dashboard":
                 me = _auth(self)
                 if not me:

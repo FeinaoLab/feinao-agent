@@ -105,6 +105,7 @@ exactly what your agent is allowed to do. That is the whole point.
 | Providers | `GET /api/providers/health?ping=1` | Never returns a full key — only `hasKey` / last-4 / length |
 | Audit | `GET /api/audit` | Every tool + LLM call; `viewer` is denied |
 | Config revisions | `GET /api/harness`, `POST /api/harness/{snapshot,activate}` | spec.json history, semantic diff, atomic rollback with hot reload (admin only) |
+| Effective policy | `GET /api/ai/policy` | Modes, limits, egress whitelist, per-tool policy as currently enforced (secrets stripped) |
 
 Roles out of the box: `admin` / `ops01` / `view01` (admin, ops, viewer).
 
@@ -190,6 +191,7 @@ Details and known trade-offs: [SECURITY.md](SECURITY.md).
 - [docs/飞忆跨会话记忆-上线说明.md](docs/飞忆跨会话记忆-上线说明.md) — cross-session memory
 - [docs/Harness2-对照与差距清单.md](docs/Harness2-对照与差距清单.md) — how this repo maps onto Google's Harness² eight editable components, and what's still missing
 - [docs/Harness版本化-上线说明.md](docs/Harness版本化-上线说明.md) — config versioning: snapshot / semantic diff / one-click rollback
+- [docs/策略数据化与卡死上限-上线说明.md](docs/策略数据化与卡死上限-上线说明.md) — policy moved into spec.json + three loop circuit breakers
 
 ## Contributing
 
