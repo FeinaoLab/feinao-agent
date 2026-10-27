@@ -57,6 +57,26 @@ python tools/bench.py --patch pilots.react_max_steps=8 --note "放宽步数上�
 
 只差一次执行的任务一律标「判不了」，不写成「变好」——把噪声写成结论，比不给结论更糟。
 
+## 验收跑在副本上：8081，不碰生产
+
+`feinao-test/` 里放一份测试配置和一份脱敏库副本，`FEINAO_SPEC` / `FEINAO_DB` / `FEINAO_PORT`
+三个开关由工具固定，不用手写、不用记：
+
+```bash
+python tools/testenv.py --prep       # 生成脱敏库副本（没有源库就用假上游种子造一份）
+python tools/testenv.py --serve      # 8081 起服
+python tools/testenv.py --check      # 冒烟：health / 登录 / 检索 / ReAct / 策略 / 基准
+python tools/testenv.py --preflight  # 端口体检：open / rst / timeout / refused 是四件事
+```
+
+护栏是硬拒绝，不是提醒：`FEINAO_SPEC` 指向 `backend/spec.json`、`FEINAO_DB` 指向
+`backend/feinao.db`、`FEINAO_DEMO=0`、端口越界——任何一条都直接起不来。它还会把本机 shell 里的
+LLM Key 清空成 mock（只在本进程），因为「测试时悄悄走了真模型」的代价不是钱，是同一条用例
+昨天过今天不过、你分不清是代码变了还是模型抽风。
+
+测试配置与生产配置由测试强制同构（只许端口、上游地址、展示名、口令不同）。想靠调松
+`modes` / `limits` / `tool_policies` 让验收变绿，测试会红。
+
 ## 核心能力
 
 - **LLM 多供应商网关**：DeepSeek / 混元 / qwen / mock 按序降级重试（combo 链），用量落库（usage 表）；Key 支持环境变量与 `.env`，无 Key 自动降级 mock
@@ -123,7 +143,7 @@ python tools/lcm_compare.py      # 对照实验：常规截断 vs LCM vs LCM+回
 ## 测试
 
 ```bash
-python -m pytest tests/ -q     # 76 项：API 全链路 + LCM + 审批 + 记忆 + 演示上游契约 + 配置版本化 + 卡死上限 + 基准双跑 + 对照判定
+python -m pytest tests/ -q     # 83 项：API 全链路 + LCM + 审批 + 记忆 + 演示上游契约 + 配置版本化 + 卡死上限 + 基准双跑 + 对照判定 + 本地测试环境护栏
 ```
 
 CI（`.github/workflows/ci.yml`）在 Python 3.9 / 3.11 / 3.13 上跑全套，另有一个
@@ -136,7 +156,7 @@ CI（`.github/workflows/ci.yml`）在 Python 3.9 / 3.11 / 3.13 上跑全套，�
 - `mobile/` — PWA（对话 + 模式切换）
 - `bench/` — 固定基准任务集 `tasks.json`（15 个任务，五类能力）+ `tools/bench.py` 双跑命令行
 - `tests/` — API 集成测试（真实起服全链路）+ LCM + 审批 + 记忆 + 演示契约 + 配置版本化 + 基准双跑
-- `docs/` — 建设方案、LCM 验证报告、各能力上线说明、[Harness² 对照与差距清单](docs/Harness2-对照与差距清单.md)、[Harness 版本化上线说明](docs/Harness版本化-上线说明.md)、[策略数据化与卡死上限](docs/策略数据化与卡死上限-上线说明.md)、[基准任务集与双跑对照](docs/基准任务集与双跑对照-上线说明.md)、[对照式判定](docs/对照式判定-上线说明.md)
+- `docs/` — 建设方案、LCM 验证报告、各能力上线说明、[Harness² 对照与差距清单](docs/Harness2-对照与差距清单.md)、[Harness 版本化上线说明](docs/Harness版本化-上线说明.md)、[策略数据化与卡死上限](docs/策略数据化与卡死上限-上线说明.md)、[基准任务集与双跑对照](docs/基准任务集与双跑对照-上线说明.md)、[对照式判定](docs/对照式判定-上线说明.md)、[本地测试环境与端口体检](docs/本地测试环境与端口体检-上线说明.md)
 - `tools/` — Logo + UI 巡检 + LCM 对照实验脚本
 
 ## 部署前必读

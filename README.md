@@ -203,16 +203,38 @@ GET  api/spec    → {entities:[{key,label,desc}]}
 GET  api/<entity>?limit=20&q=keyword → {rows:[...], total:N}
 ```
 
+## Acceptance runs on a copy, on :8081
+
+`feinao-test/` holds a test spec and a scrubbed copy of the database. Three switches
+(`FEINAO_SPEC`, `FEINAO_DB`, `FEINAO_PORT`) are pinned by a tool, so nobody has to remember them:
+
+```bash
+python tools/testenv.py --prep       # build the scrubbed DB copy (seeded fake data if there is no source)
+python tools/testenv.py --serve      # boot on :8081
+python tools/testenv.py --check      # smoke: health / login / RAG / ReAct / policy / benchmark
+python tools/testenv.py --preflight  # port probe: open / rst / timeout / refused are four different things
+```
+
+The guards are refusals, not warnings. Point `FEINAO_SPEC` at `backend/spec.json`, point `FEINAO_DB` at
+`backend/feinao.db`, set `FEINAO_DEMO=0`, or pick a port outside 8080-8099 and it will not start.
+It also blanks any LLM keys present in your shell for that process, because a test that silently hits
+a real model is not expensive — it is unreproducible: the same case passes today and fails tomorrow
+and you cannot tell whether the code or the model changed.
+
+A test asserts the test spec stays isomorphic to the production spec (only port, upstream URLs,
+display names and passwords may differ). Loosening `modes` / `limits` / `tool_policies` to make
+acceptance go green will turn that test red.
+
 ## Tests
 
 ```bash
-python -m pytest tests/ -q      # 76 passed
+python -m pytest tests/ -q      # 83 passed
 ```
 
 Covers the full HTTP chain (real server, mock LLM), LCM recall, the approval lifecycle, memory
 extraction and grounding, the demo upstream contract, config versioning (semantic diff, atomic
 rollback, dirty-JSON rejection), the three loop circuit breakers, the benchmark dual run, and the
-comparison rules (a single flip is never called an improvement)
+comparison rules (a single flip is never called an improvement), and the local test-env guards
 (including a test that a deliberately broken candidate scores lower). CI runs it on Python
 3.9 / 3.11 / 3.13, plus a clone-and-run smoke test that installs **nothing**.
 
@@ -238,6 +260,7 @@ Details and known trade-offs: [SECURITY.md](SECURITY.md).
 - [docs/策略数据化与卡死上限-上线说明.md](docs/策略数据化与卡死上限-上线说明.md) — policy moved into spec.json + three loop circuit breakers
 - [docs/基准任务集与双跑对照-上线说明.md](docs/基准任务集与双跑对照-上线说明.md) — the fixed task set and how a config change is judged
 - [docs/对照式判定-上线说明.md](docs/对照式判定-上线说明.md) — why there is no score, and how a difference becomes a sentence
+- [docs/本地测试环境与端口体检-上线说明.md](docs/本地测试环境与端口体检-上线说明.md) — the test env on :8081, and why an SSH port that resets is not a port that is closed
 
 ## Contributing
 

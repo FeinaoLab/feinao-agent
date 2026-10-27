@@ -41,6 +41,19 @@ jobs:
       - name: Unit + integration tests
         run: python -m pytest tests/ -q
 
+      - name: Test env refuses to touch production
+        run: |
+          python tools/testenv.py --prep
+          set +e
+          FEINAO_DEMO=0 python tools/testenv.py --serve > /tmp/refuse.log 2>&1
+          code=$?
+          cat /tmp/refuse.log
+          if [ "$code" != "2" ]; then
+            echo "expected the guard to refuse (exit 2), got $code"
+            exit 1
+          fi
+          grep -q "假上游" /tmp/refuse.log
+
   smoke:
     name: clone-and-run smoke test
     runs-on: ubuntu-latest
