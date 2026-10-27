@@ -16,6 +16,7 @@ FRONTEND = os.path.abspath(os.path.join(BASE, "..", "frontend"))
 MOBILE = os.path.abspath(os.path.join(BASE, "..", "mobile"))
 
 import ai  # noqa: E402
+import bench  # noqa: E402
 import lcm  # noqa: E402
 import memory  # noqa: E402
 import json as _json
@@ -281,6 +282,24 @@ class Handler(BaseHTTPRequestHandler):
                 if out.get("error"):
                     return self._json(404, out)
                 return self._json(200, out)
+            if len(parts) == 2 and parts[1] == "bench":
+                # GET /api/bench —— 基准任务集 + 历史双跑（只给 admin：含配置与执行细节）
+                me = _auth(self, roles=("admin",))
+                if not me:
+                    return self._json(403 if me is False else 401, {"error": "请先登录或无权限"})
+                return self._json(200, bench.overview())
+            if parts[1:3] == ["bench", "detail"]:
+                # GET /api/bench/detail?id=N —— 一轮双跑的逐条执行与汇总
+                me = _auth(self, roles=("admin",))
+                if not me:
+                    return self._json(403 if me is False else 401, {"error": "请先登录或无权限"})
+                jid = int((qs.get("id") or ["0"])[0])
+                if not jid:
+                    return self._json(422, {"error": "id 必填"})
+                out = bench.job_detail(jid)
+                if out.get("error"):
+                    return self._json(404, out)
+                return self._json(200, out)
             return self._json(404, {"error": "not found"})
         except Exception as e:
             return self._json(500, {"error": str(e)[:200]})
@@ -399,6 +418,26 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(404, r)
                 return self._json(200, r)
 
+            if parts[1:3] == ["bench", "run"]:
+                # POST /api/bench/run {base_rev?, cand_rev?|patch, tasks?, repeats?, note?}
+                # 同一批任务在 base 与候选修订上各跑 N 次，指标落库，配置跑完还原
+                if me["role"] != "admin":
+                    return self._json(403, {"error": "只有 admin 能跑双跑对照（会临时切换配置）"})
+                try:
+                    repeats = int(body.get("repeats")) if body.get("repeats") is not None else 3
+                except (TypeError, ValueError):
+                    return self._json(422, {"error": "repeats 必须是数字"})
+                if repeats < 1 or repeats > 5:
+                    return self._json(422, {"error": "repeats 只能是 1-5（再大就是烧钱，不是提精度）"})
+                r = bench.run_job(base_rev=body.get("base_rev"), cand_rev=body.get("cand_rev"),
+                                  patch=body.get("patch"), task_ids=body.get("tasks"),
+                                  repeats=repeats, note=body.get("note", ""), by=user,
+                                  user=body.get("run_as"))
+                if r.get("error"):
+                    busy = "正在进行" in r["error"]
+                    return self._json(409 if busy else 422, r)
+                return self._json(200, r)
+
             if parts[1:3] == ["chat"]:
                 text = (body.get("text") or "").strip()
                 if text:
@@ -501,6 +540,7 @@ def run():
     ai.init_db()
     lcm.init_lcm_db()
     memory.init_memory_db()
+    bench.init_db()
     _startup_notes()
     port = int(os.environ.get("FEINAO_PORT", SPEC["brand"]["port"]))
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)

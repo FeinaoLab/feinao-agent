@@ -89,6 +89,28 @@ clicks activate. `auto_activate_min` defaults to 1.0, i.e. off.
 makes this readable and auditable. You can read `ai.py` (1,000 lines) in one sitting and know
 exactly what your agent is allowed to do. That is the whole point.
 
+**6. "Better" is measured against a fixed task set, not against a feeling.**
+Tuning a prompt or a budget and eyeballing three answers is how harnesses quietly rot. There is a
+fixed 15-task benchmark (`bench/tasks.json`: RAG / NL2API / script / ReAct / approval), and one
+command runs the same tasks on the current config and on a candidate:
+
+```bash
+python tools/bench.py --patch pilots.react_max_steps=8 --note "放宽步数上限"
+```
+
+```
+任务           类型       通过率 base→cand  步数      工具调用   被拒    审批    证据
+react-01       react      1.0 → 0.0        1.0→1.0  1.0→0.0   0.0→1.0  0.0→0.0  1.0→1.0
+      ↳ 候选失败原因：没有执行预期动作 search_docs（实际：无）
+汇总  通过率 1.0 → 0.0（差 -1）  证据完整率 1.0 → 1.0  被拒 0.0 → 1.0  审批交接 0.0 → 0.0
+配置已还原：是（磁盘 spec.json 未被改动）
+```
+
+Every number is a fact read back from `task_steps` / `approvals` / `usage` / `evidence` — no model
+grading itself. The pass/fail verdict comes from each task's `expect` block, so it is reproducible.
+The candidate is stored as a revision with `active=0`: you benchmark it, then decide whether to
+activate it. Config is swapped in memory only and restored afterwards, sha-verified.
+
 ## Feature map
 
 | Area | Endpoint | Notes |
@@ -106,6 +128,7 @@ exactly what your agent is allowed to do. That is the whole point.
 | Audit | `GET /api/audit` | Every tool + LLM call; `viewer` is denied |
 | Config revisions | `GET /api/harness`, `POST /api/harness/{snapshot,activate}` | spec.json history, semantic diff, atomic rollback with hot reload (admin only) |
 | Effective policy | `GET /api/ai/policy` | Modes, limits, egress whitelist, per-tool policy as currently enforced (secrets stripped) |
+| Benchmark | `GET /api/bench`, `POST /api/bench/run` | Fixed 15-task set run twice (base vs candidate), metrics from real execution facts (admin only) |
 
 Roles out of the box: `admin` / `ops01` / `view01` (admin, ops, viewer).
 
@@ -165,12 +188,14 @@ GET  api/<entity>?limit=20&q=keyword → {rows:[...], total:N}
 ## Tests
 
 ```bash
-python -m pytest tests/ -q      # 38 passed
+python -m pytest tests/ -q      # 65 passed
 ```
 
 Covers the full HTTP chain (real server, mock LLM), LCM recall, the approval lifecycle, memory
-extraction and grounding, and the demo upstream contract. CI runs it on Python 3.9 / 3.11 / 3.13,
-plus a clone-and-run smoke test that installs **nothing**.
+extraction and grounding, the demo upstream contract, config versioning (semantic diff, atomic
+rollback, dirty-JSON rejection), the three loop circuit breakers, and the benchmark dual run
+(including a test that a deliberately broken candidate scores lower). CI runs it on Python
+3.9 / 3.11 / 3.13, plus a clone-and-run smoke test that installs **nothing**.
 
 ## Read before deploying
 
@@ -192,6 +217,7 @@ Details and known trade-offs: [SECURITY.md](SECURITY.md).
 - [docs/Harness2-对照与差距清单.md](docs/Harness2-对照与差距清单.md) — how this repo maps onto Google's Harness² eight editable components, and what's still missing
 - [docs/Harness版本化-上线说明.md](docs/Harness版本化-上线说明.md) — config versioning: snapshot / semantic diff / one-click rollback
 - [docs/策略数据化与卡死上限-上线说明.md](docs/策略数据化与卡死上限-上线说明.md) — policy moved into spec.json + three loop circuit breakers
+- [docs/基准任务集与双跑对照-上线说明.md](docs/基准任务集与双跑对照-上线说明.md) — the fixed task set and how a config change is judged
 
 ## Contributing
 

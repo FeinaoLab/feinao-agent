@@ -96,6 +96,26 @@ jobs:
           print("cited:", [s["title"] for s in d["sources"]])
           PY
 
+      # 基准任务集双跑：证明"改配置→跑同一批任务→看差异"这条链在干净环境里成立。
+      # 用的是内置假上游 + mock 模型，不需要任何 Key，也不花钱。
+      - name: Benchmark dual run (base vs candidate)
+        run: |
+          FEINAO_DB=/tmp/bench.db python tools/bench.py \
+            --patch pilots.rag_topk=3 \
+            --tasks rag-01,react-01,react-02 \
+            --repeats 1 --json > /tmp/bench.json
+          python - <<'PY'
+          import json
+          d = json.load(open("/tmp/bench.json"))
+          assert d.get("ok") and d.get("restored"), d
+          s = d["summary"]
+          assert s["base"]["ok_rate"] == 1.0, s["base"]
+          assert s["cand"]["ok_rate"] == 1.0, s["cand"]
+          assert s["delta"]["ok_rate"] == 0.0, s["delta"]
+          print("bench ok: base", s["base"]["ok_rate"], "-> cand", s["cand"]["ok_rate"],
+                "| evidence", s["base"]["evidence_rate"])
+          PY
+
       - name: Dump server log on failure
         if: failure()
         run: cat /tmp/server.log

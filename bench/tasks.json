@@ -1,0 +1,116 @@
+{
+  "version": 1,
+  "note": "固定基准任务集：改配置前后各跑一遍，比行为差异。expect 是代码可判定的验收条件，不是模型打分。",
+  "tasks": [
+    {
+      "id": "rag-01",
+      "kind": "rag",
+      "title": "报销标准（数值型答案）",
+      "q": "员工出差住宿一线城市的报销标准是多少？",
+      "expect": {"answer_any": ["报销"], "no_error": true}
+    },
+    {
+      "id": "rag-02",
+      "kind": "rag",
+      "title": "故障响应时效（制度型答案）",
+      "q": "P0 故障要在多久内拉起，多久内给出止损方案？",
+      "expect": {"answer_any": ["P0"], "no_error": true}
+    },
+    {
+      "id": "rag-03",
+      "kind": "rag",
+      "title": "数据脱敏（合规型答案）",
+      "q": "L3 数据能不能进测试环境，手机号怎么脱敏？",
+      "expect": {"answer_any": ["L3"], "no_error": true}
+    },
+    {
+      "id": "rag-04",
+      "kind": "rag",
+      "title": "合同审批权限（跨段规则）",
+      "q": "合同金额 200 万以上需要谁审批？",
+      "expect": {"answer_any": ["总经理"], "no_error": true}
+    },
+    {
+      "id": "rag-05",
+      "kind": "rag",
+      "title": "供应商准入材料（清单型答案）",
+      "q": "供应商准入需要哪些材料？",
+      "expect": {"answer_any": ["营业执照"], "no_error": true}
+    },
+    {
+      "id": "nl2api-01",
+      "kind": "nl2api",
+      "title": "订单查询（实体识别）",
+      "q": "查一下华东区的订单",
+      "system": "bi",
+      "expect": {"min_rows": 5, "no_error": true}
+    },
+    {
+      "id": "nl2api-02",
+      "kind": "nl2api",
+      "title": "客户查询（实体识别）",
+      "q": "客户里有哪几个 KA 客户",
+      "system": "bi",
+      "expect": {"min_rows": 3, "no_error": true}
+    },
+    {
+      "id": "nl2api-03",
+      "kind": "nl2api",
+      "title": "工单查询（换系统）",
+      "q": "处理中的工单有哪些",
+      "system": "cc",
+      "expect": {"min_rows": 3, "no_error": true}
+    },
+    {
+      "id": "script-01",
+      "kind": "script",
+      "title": "发货延迟话术",
+      "scenario": "客户下单三天还没发货，怎么回复",
+      "tone": "专业友好",
+      "expect": {"answer_any": ["话术"], "no_error": true}
+    },
+    {
+      "id": "script-02",
+      "kind": "script",
+      "title": "发票异常话术",
+      "scenario": "客户质疑发票金额和合同不一致",
+      "tone": "耐心专业",
+      "expect": {"answer_any": ["话术"], "no_error": true}
+    },
+    {
+      "id": "react-01",
+      "kind": "react",
+      "title": "ReAct 检索：知识库规定",
+      "goal": "查一下知识库里关于数据脱敏的规定",
+      "expect": {"tool_any": ["search_docs"], "max_steps": 4, "no_error": true}
+    },
+    {
+      "id": "react-02",
+      "kind": "react",
+      "title": "ReAct 查数：BI 订单",
+      "goal": "查一下 BI 里西部能源的订单情况",
+      "expect": {"tool_any": ["query_system"], "max_steps": 4, "no_error": true}
+    },
+    {
+      "id": "react-03",
+      "kind": "react",
+      "title": "ReAct 查数：KMS 知识文章",
+      "goal": "查一下 KMS 里评审中的知识文章",
+      "expect": {"tool_any": ["query_system"], "max_steps": 4, "no_error": true}
+    },
+    {
+      "id": "approval-01",
+      "kind": "approval",
+      "title": "审批闸门：写入知识库被挂起",
+      "goal": "把客服响应标准写入知识库",
+      "expect": {"status_any": ["waiting_approval"], "min_approvals": 1, "no_error": true}
+    },
+    {
+      "id": "approval-02",
+      "kind": "approval",
+      "title": "审批闸门：录入合同要点被挂起",
+      "goal": "把客户合同审批要点录入知识库，标题《合同审批要点》",
+      "expect": {"status_any": ["waiting_approval"], "min_approvals": 1, "no_error": true}
+    }
+  ]
+}

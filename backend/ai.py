@@ -830,9 +830,50 @@ def _call_openai(p, messages, timeout=30):
     return text
 
 
+def _mock_react_plan(goal):
+    """把任务关键词映射成确定的动作序列（只给 mock 用，真模型不需要）。
+
+    没有 Key 的环境也得能把 ReAct 真正跑起来：调工具、过权限预算、走审批闸门。
+    否则基准任务集在 demo 模式下永远是 0 步 0 调用，双跑对照看不出任何差别。
+    """
+    g = goal or ""
+    plan = []
+    if any(k in g for k in ("写入", "入库", "录入", "存到知识库", "记到知识库")):
+        title = re.sub(r"[，。,.；;]", " ", g).strip()[:20] or "mock 文档"
+        plan.append(("ingest_doc", {"title": title, "body": g[:400]}))
+    ent = ""
+    if "订单" in g:
+        ent = "order"
+    elif "客户" in g:
+        ent = "customer"
+    elif "工单" in g:
+        ent = "ticket"
+    elif "文章" in g:
+        ent = "article"
+    if ent:
+        system = "cc" if ent == "ticket" else ("kms" if ent == "article" else "bi")
+        plan.append(("query_system", {"system": system, "entity": ent, "q": ""}))
+    if any(k in g for k in ("知识库", "文档", "规定", "制度", "标准", "政策")):
+        kws = [k for k in _keywords(g, 8) if len(k) >= 2][:2]
+        plan.append(("search_docs", {"q": " ".join(kws) or g[:20]}))
+    return plan
+
+
 def _call_mock(messages, **kw):
     sys_txt = "\n".join(m.get("content", "") for m in messages if m.get("role") == "system")
     user_txt = "\n".join(m.get("content", "") for m in messages if m.get("role") == "user")
+    if "[PILOT:react]" in sys_txt:
+        # 会调工具的 mock：按任务关键词给出确定性动作序列，执行过的动作不再重复。
+        hit = re.search(r"任务：(.*?)\n已执行：", user_txt, re.S)
+        goal = (hit.group(1) if hit else user_txt).strip()
+        plan = _mock_react_plan(goal)
+        done = re.findall(r'"tool":\s*"([a-z_]+)"', user_txt)
+        for tool, args in plan:
+            if tool not in done:
+                return json.dumps({"tool": tool, "args": args}, ensure_ascii=False)
+        used = "、".join(sorted(set(done))) or "直接回答"
+        return "（飞脑·mock）已完成：%s。依据：%s。" % (goal[:50], used)
+
     if "[PILOT:lcm]" in sys_txt:
         # 模拟"只能看见给定上下文"的模型：上下文里有就答，没有就说不知道。
         # 用它来做 LCM / 截断窗口的对照实验，结论不掺运气。

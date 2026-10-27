@@ -32,6 +32,19 @@ LLM Key（`FEINAO_QWEN_KEY` / `FEINAO_DEEPSEEK_KEY` / `FEINAO_HUNYUAN_KEY`）；
   <br><sub>审批闸门：写操作带着工具、参数、发起人、任务目标停在待审批区，点「放行并执行」才真跑。</sub>
 </p>
 
+## 改配置之前，先跑一轮双跑
+
+同一批固定任务（`bench/tasks.json`，15 个，覆盖 RAG / NL2API / 话术 / ReAct / 审批）在旧配置与
+候选配置上各跑一遍，比的是一行行能复查的事实（步数、工具调用、被拒、审批、证据），不是感觉：
+
+```bash
+python tools/bench.py --list                                    # 先看任务集
+python tools/bench.py --patch pilots.react_max_steps=8 --note "放宽步数上限"
+```
+
+候选配置以修订形式落库但不生效（`active=0`），跑完内存配置自动还原并自检 sha；磁盘上的
+`spec.json` 一个字都不动。觉得确实更好，再去「飞构」页激活它。
+
 ## 核心能力
 
 - **LLM 多供应商网关**：DeepSeek / 混元 / qwen / mock 按序降级重试（combo 链），用量落库（usage 表）；Key 支持环境变量与 `.env`，无 Key 自动降级 mock
@@ -49,6 +62,7 @@ LLM Key（`FEINAO_QWEN_KEY` / `FEINAO_DEEPSEEK_KEY` / `FEINAO_HUNYUAN_KEY`）；
 - **飞忆跨会话长期记忆（v1.5）**：从会话抽取事实/决定/偏好/产出物，默认待确认、人工点头才生效；新会话按关键词检索注入（带 M#编号/日期/来源会话），命中不到不注入；三道过滤（反虚构 grounding、过程噪声、去重+新值取代旧值）；接口 `GET /api/memory`、`POST /api/memory/decide`、`POST /api/memory/extract`（详见 `docs/飞忆跨会话记忆-上线说明.md`）
 - **策略数据化 + 卡死上限（v1.8）**：模式/上限/出站白名单进 `spec.json` 顶层段，与业务配置共用飞构的版本、语义 diff、一次性回滚；坏配置拒绝启动且指名报错；ReAct 三条中断（墙钟 / 三连相同调用 / 连续畸形输出）落证据链并给人话提示；接口 `GET /api/ai/policy`（详见 `docs/策略数据化与卡死上限-上线说明.md`）
 - **飞构·配置版本化（v1.7）**：`spec.json` 有历史、能对比、可回滚——起服自动快照（幂等），语义 diff 精确到键（改缩进不算改动），回滚=原子写盘+热加载不重启，脏 JSON 拒绝上线；admin 专属，回滚必留审计；接口 `GET /api/harness`、`POST /api/harness/{snapshot,activate}`（详见 `docs/Harness版本化-上线说明.md`）
+- **基准任务集 + 双跑对照（v1.9）**：`bench/tasks.json` 固定 15 个任务（RAG / NL2API / 话术 / ReAct / 审批），同一批任务在 base 与候选修订上各跑 N 次，指标全部来自 `task_steps`/`approvals`/`usage`/`evidence` 的真实事实，通过率由任务自带的 `expect` 判定（代码判据，不是模型打分）；候选以 `active=0` 落库、跑完内存还原并自检 sha；接口 `GET /api/bench`、`POST /api/bench/run`、命令行 `python tools/bench.py`（详见 `docs/基准任务集与双跑对照-上线说明.md`）
 - **演示自足化（v1.6）**：`backend/demo.py` 提供 KMS / BI / 工单三个假上游与 9 篇种子文档；`FEINAO_DEMO=1`（默认）时随服务启动，`FEINAO_DEMO=0` 时走 `spec.json` 里每个上游的 `base`
 - **审计与配额**：全工具/LLM 调用写 audit；viewer 无审计权限
 
@@ -96,7 +110,7 @@ python tools/lcm_compare.py      # 对照实验：常规截断 vs LCM vs LCM+回
 ## 测试
 
 ```bash
-python -m pytest tests/ -q     # 38 项：API 全链路 + LCM + 审批 + 记忆 + 演示上游契约 + 供应商真实链路
+python -m pytest tests/ -q     # 65 项：API 全链路 + LCM + 审批 + 记忆 + 演示上游契约 + 配置版本化 + 卡死上限 + 基准双跑
 ```
 
 CI（`.github/workflows/ci.yml`）在 Python 3.9 / 3.11 / 3.13 上跑全套，另有一个
@@ -107,8 +121,9 @@ CI（`.github/workflows/ci.yml`）在 Python 3.9 / 3.11 / 3.13 上跑全套，�
 - `backend/` — `engine.py`（HTTP）+ `ai.py`（网关/RAG/试点/ReAct/审批）+ `lcm.py`（无损上下文）+ `memory.py`（跨会话记忆）+ `demo.py`（内置假上游与种子数据）+ `spec.json`
 - `frontend/` — 对话工作台 SPA（对话 + 三试点 + 审计看板 + 飞审 + 飞忆）
 - `mobile/` — PWA（对话 + 模式切换）
-- `tests/` — API 集成测试（真实起服全链路）+ LCM + 审批 + 记忆 + 演示契约
-- `docs/` — 建设方案、LCM 验证报告、各能力上线说明、[Harness² 对照与差距清单](docs/Harness2-对照与差距清单.md)、[Harness 版本化上线说明](docs/Harness版本化-上线说明.md)、[策略数据化与卡死上限](docs/策略数据化与卡死上限-上线说明.md)
+- `bench/` — 固定基准任务集 `tasks.json`（15 个任务，五类能力）+ `tools/bench.py` 双跑命令行
+- `tests/` — API 集成测试（真实起服全链路）+ LCM + 审批 + 记忆 + 演示契约 + 配置版本化 + 基准双跑
+- `docs/` — 建设方案、LCM 验证报告、各能力上线说明、[Harness² 对照与差距清单](docs/Harness2-对照与差距清单.md)、[Harness 版本化上线说明](docs/Harness版本化-上线说明.md)、[策略数据化与卡死上限](docs/策略数据化与卡死上限-上线说明.md)、[基准任务集与双跑对照](docs/基准任务集与双跑对照-上线说明.md)
 - `tools/` — Logo + UI 巡检 + LCM 对照实验脚本
 
 ## 部署前必读
