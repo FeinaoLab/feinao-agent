@@ -55,11 +55,12 @@ def init_memory_db():
         hits INT DEFAULT 0, last_used TEXT,
         slot TEXT);
     CREATE INDEX IF NOT EXISTS idx_memory_user ON memory(user, status);
-    CREATE INDEX IF NOT EXISTS idx_memory_slot ON memory(kind, slot);
     """)
+    # 注意顺序：老库上 slot 列由 ALTER 补，索引必须等列就位后再建（executescript 里建会炸）
     cols = [r[1] for r in conn.execute("PRAGMA table_info(memory)")]
     if "slot" not in cols:
         conn.execute("ALTER TABLE memory ADD COLUMN slot TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_slot ON memory(kind, slot)")
     conn.commit()
     conn.close()
     return
