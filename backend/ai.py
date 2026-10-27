@@ -15,6 +15,12 @@ SPEC = json.load(io.open(os.path.join(BASE, "spec.json"), encoding="utf-8"))
 DB_PATH = os.environ.get("FEINAO_DB", os.path.join(BASE, "feinao.db"))
 _lock_lock = True
 
+# 验证型收尾要求：所有面向用户的回答都必须满足。
+# 来源：Harness 循环设计的核心原则——完成必须是可验证产物，不能是模型自述。
+VERIFY_TAIL = ("回答收尾要求：① 结论必须附依据（来自哪条上下文/文档编号/接口返回）；"
+               "② 涉及产出物时写明保存在哪、如何核对；"
+               "③ 无法验证的部分明确标注「未验证」，不得声称已完成。")
+
 
 def _load_env_file():
     """从 .env 文件读供应商 Key（优先级低于真实环境变量，不改动 systemd 单元）。
@@ -120,7 +126,7 @@ def _call_mock(messages, **kw):
         asks_num = any(t in question for t in ("多少", "几", "多大", "比例", "金额", "时间", "日期"))
         scored = []
         for line in sys_txt.splitlines():
-            if "[PILOT:" in line:
+            if "[PILOT:" in line or line.startswith("回答收尾要求"):
                 continue
             hit = sum(1 for k in kws if k in line)
             if not hit:
@@ -342,7 +348,7 @@ def pilot_ask(q, user="admin"):
     hits = rag_search(q)
     ctx = "\n".join("[DOC%d] %s\n%s" % (i + 1, h["title"], (h["body"] or "")[:600]) for i, h in enumerate(hits))
     messages = [
-        {"role": "system", "content": "你是飞系知识助手。仅依据以下知识库文档回答，并标注引用编号。[PILOT:rag]\n" + ctx},
+        {"role": "system", "content": "你是飞系知识助手。仅依据以下知识库文档回答，并标注引用编号。" + VERIFY_TAIL + " [PILOT:rag]\n" + ctx},
         {"role": "user", "content": q},
     ]
     ans, provider = llm_chat(messages, user)
@@ -446,8 +452,8 @@ def react_run(task, user="admin"):
     trace = []
     for step in range(max_steps):
         raw, provider = llm_chat([
-            {"role": "system", "content": "你是飞脑Agent。可用工具：%s。如需工具，输出JSON：{\"tool\":\"名称\",\"args\":{...}}；若可回答，直接输出答案。 [PILOT:react]" %
-             json.dumps({k: v["desc"] for k, v in TOOLS.items()}, ensure_ascii=False)},
+            {"role": "system", "content": "你是飞脑Agent。可用工具：%s。如需工具，输出JSON：{\"tool\":\"名称\",\"args\":{...}}；若可回答，直接输出答案并遵守：%s [PILOT:react]" %
+             (json.dumps({k: v["desc"] for k, v in TOOLS.items()}, ensure_ascii=False), VERIFY_TAIL)},
             {"role": "user", "content": "任务：%s\n已执行：%s" % (task, json.dumps(trace, ensure_ascii=False)[:1500])},
         ], user)
         m = re.search(r"\{.*\}", raw, re.S)
