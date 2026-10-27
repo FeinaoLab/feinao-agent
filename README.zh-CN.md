@@ -47,6 +47,7 @@ LLM Key（`FEINAO_QWEN_KEY` / `FEINAO_DEEPSEEK_KEY` / `FEINAO_HUNYUAN_KEY`）；
 - **任务进度落库（v1.3）**：`tasks` + `task_steps`（tool_call / tool_result / denied / pending / error / answer / replay），步数耗尽保持 `active` 可 `task_id` 断点续跑；接口 `GET /api/tasks`、`GET /api/tasks/detail?id=N`
 - **飞审审批工作台（v1.4）**：`requires_confirm` 的真闸门——写操作自动挂审批单（工具/参数/发起人/任务目标），人工「放行并执行」后系统真执行该动作并让任务自动续跑，拒绝则动作不执行、理由回给模型；重复提交防扰 + 幂等回放；接口 `GET /api/approvals`、`POST /api/approvals/decide`（详见 `docs/飞审审批工作台-上线说明.md`）
 - **飞忆跨会话长期记忆（v1.5）**：从会话抽取事实/决定/偏好/产出物，默认待确认、人工点头才生效；新会话按关键词检索注入（带 M#编号/日期/来源会话），命中不到不注入；三道过滤（反虚构 grounding、过程噪声、去重+新值取代旧值）；接口 `GET /api/memory`、`POST /api/memory/decide`、`POST /api/memory/extract`（详见 `docs/飞忆跨会话记忆-上线说明.md`）
+- **飞构·配置版本化（v1.7）**：`spec.json` 有历史、能对比、可回滚——起服自动快照（幂等），语义 diff 精确到键（改缩进不算改动），回滚=原子写盘+热加载不重启，脏 JSON 拒绝上线；admin 专属，回滚必留审计；接口 `GET /api/harness`、`POST /api/harness/{snapshot,activate}`（详见 `docs/Harness版本化-上线说明.md`）
 - **演示自足化（v1.6）**：`backend/demo.py` 提供 KMS / BI / 工单三个假上游与 9 篇种子文档；`FEINAO_DEMO=1`（默认）时随服务启动，`FEINAO_DEMO=0` 时走 `spec.json` 里每个上游的 `base`
 - **审计与配额**：全工具/LLM 调用写 audit；viewer 无审计权限
 
@@ -106,7 +107,7 @@ CI（`.github/workflows/ci.yml`）在 Python 3.9 / 3.11 / 3.13 上跑全套，�
 - `frontend/` — 对话工作台 SPA（对话 + 三试点 + 审计看板 + 飞审 + 飞忆）
 - `mobile/` — PWA（对话 + 模式切换）
 - `tests/` — API 集成测试（真实起服全链路）+ LCM + 审批 + 记忆 + 演示契约
-- `docs/` — 建设方案、LCM 验证报告、各能力上线说明、[Harness² 对照与差距清单](docs/Harness2-对照与差距清单.md)
+- `docs/` — 建设方案、LCM 验证报告、各能力上线说明、[Harness² 对照与差距清单](docs/Harness2-对照与差距清单.md)、[Harness 版本化上线说明](docs/Harness版本化-上线说明.md)
 - `tools/` — Logo + UI 巡检 + LCM 对照实验脚本
 
 ## 部署前必读

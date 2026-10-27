@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """飞脑 AI 层：LLM 多供应商网关（降级链）+ RAG(FTS5) + 工具 + 三试点。
 零依赖：仅 Python 标准库。"""
+import difflib
+import hashlib
 import io
 import json
 import os
@@ -11,7 +13,8 @@ import urllib.request
 import urllib.error
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-SPEC = json.load(io.open(os.path.join(BASE, "spec.json"), encoding="utf-8"))
+SPEC_PATH = os.environ.get("FEINAO_SPEC") or os.path.join(BASE, "spec.json")
+SPEC = json.load(io.open(SPEC_PATH, encoding="utf-8"))
 DB_PATH = os.environ.get("FEINAO_DB", os.path.join(BASE, "feinao.db"))
 _lock_lock = True
 
@@ -88,6 +91,9 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INT, step_idx INT, user TEXT,
         tool TEXT, args TEXT, reason TEXT, status TEXT DEFAULT 'pending', consumed INT DEFAULT 0,
         created TEXT, decided TEXT, decided_by TEXT, note TEXT, result TEXT);
+    CREATE TABLE IF NOT EXISTS harness_rev(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, sha TEXT, content TEXT, note TEXT,
+        by TEXT, created TEXT, active INT DEFAULT 0);
     """)
     for u, p in SPEC["users"].items():
         conn.execute("INSERT OR IGNORE INTO users VALUES(?,?,?)",
@@ -95,6 +101,7 @@ def init_db():
     conn.commit()
     conn.close()
     _ensure_fts()
+    harness_snapshot(note="启动快照")  # 每次起服记一版，内容没变则幂等跳过
 
 
 def _ensure_fts():
@@ -462,6 +469,173 @@ def _set_approval_result(aid, consumed, result):
     conn.execute("UPDATE approvals SET consumed=?, result=? WHERE id=?", (consumed, result, aid))
     conn.commit()
     conn.close()
+
+
+# ---------------- Harness 版本化（spec.json 的快照 / 对比 / 回滚） ----------------
+#
+# 原则：凡是能改变 agent 行为的配置（工具策略、审批人、上游、试点参数）都必须有历史、
+# 能对比、能回到上一版。没有这一层，任何"改进"都不可证伪——改坏了连退路都没有。
+
+def _spec_text():
+    with io.open(SPEC_PATH, encoding="utf-8") as f:
+        return f.read()
+
+
+def spec_sha(text=None):
+    """配置文件指纹（前 16 位十六进制），用于判重与对外展示。"""
+    t = _spec_text() if text is None else text
+    return hashlib.sha256(t.encode("utf-8")).hexdigest()[:16]
+
+
+def _harness_row(r, with_content=False):
+    d = {"id": r["id"], "sha": r["sha"], "note": r["note"] or "", "by": r["by"] or "",
+         "created": r["created"], "active": bool(r["active"]),
+         "bytes": len(r["content"] or "")}
+    if with_content:
+        d["content"] = r["content"] or ""
+    return d
+
+
+def harness_snapshot(note="", by="system"):
+    """把当前 spec.json 落成一条修订。内容与历史某版一致时幂等返回（created=False）。"""
+    text = _spec_text()
+    sha = spec_sha(text)
+    conn = db()
+    row = conn.execute("SELECT * FROM harness_rev WHERE sha=?", (sha,)).fetchone()
+    if row:
+        conn.close()
+        return False, _harness_row(row)
+    now = _now()
+    conn.execute("UPDATE harness_rev SET active=0")
+    cur = conn.execute(
+        "INSERT INTO harness_rev(sha,content,note,by,created,active) VALUES(?,?,?,?,?,1)",
+        (sha, text, note or "", by, now))
+    rid = cur.lastrowid
+    conn.commit()
+    row = conn.execute("SELECT * FROM harness_rev WHERE id=?", (rid,)).fetchone()
+    conn.close()
+    return True, _harness_row(row)
+
+
+def harness_list(limit=20):
+    conn = db()
+    rows = [dict(r) for r in conn.execute(
+        "SELECT id,sha,note,by,created,active,length(content) bytes FROM harness_rev "
+        "ORDER BY id DESC LIMIT ?", (limit,))]
+    act = conn.execute("SELECT id FROM harness_rev WHERE active=1 LIMIT 1").fetchone()
+    conn.close()
+    for r in rows:
+        r["active"] = bool(r["active"])
+    return {"rows": rows, "active": (act["id"] if act else None), "sha": spec_sha(),
+            "note": "sha 为当前磁盘文件指纹；active 为正在生效的修订"}
+
+
+def harness_get(rid):
+    conn = db()
+    row = conn.execute("SELECT * FROM harness_rev WHERE id=?", (rid,)).fetchone()
+    conn.close()
+    return _harness_row(row, with_content=True) if row else None
+
+
+def _spec_flat(o, prefix=""):
+    """把嵌套配置拍平成 {a.b[0].c: 值}，用于语义对比（格式变化不算改动）。"""
+    out = {}
+    if isinstance(o, dict):
+        for k, v in o.items():
+            out.update(_spec_flat(v, ("%s.%s" % (prefix, k)) if prefix else str(k)))
+    elif isinstance(o, list):
+        for i, v in enumerate(o):
+            out.update(_spec_flat(v, "%s[%d]" % (prefix, i)))
+    else:
+        out[prefix] = o
+    return out
+
+
+def _spec_flat_text(text):
+    """容错版：历史修订可能是坏 JSON（早期人工塞进来的），对比时不能因此报错。"""
+    t = (text or "").strip()
+    if not t:
+        return {}
+    try:
+        return _spec_flat(json.loads(t))
+    except Exception:
+        return {"<无法解析的内容>": t[:200]}
+
+
+def harness_diff(a=None, b=None):
+    """两版之间的差异（a → b）。语义对比为主，原始行 diff 为辅。
+
+    只比 JSON 语义：把配置用别的缩进重写一遍不算改动，否则 diff 全是噪音。
+    """
+    conn = db()
+    if not a or not b:
+        ids = [r["id"] for r in conn.execute("SELECT id FROM harness_rev ORDER BY id DESC LIMIT 2")]
+        if len(ids) < 2:
+            conn.close()
+            return {"error": "至少需要两条修订才能对比"}
+        b, a = ids[0], ids[1]
+    a, b = int(a), int(b)
+    ra = conn.execute("SELECT * FROM harness_rev WHERE id=?", (a,)).fetchone()
+    rb = conn.execute("SELECT * FROM harness_rev WHERE id=?", (b,)).fetchone()
+    conn.close()
+    if not ra or not rb:
+        return {"error": "修订不存在"}
+    fa = _spec_flat_text(ra["content"])
+    fb = _spec_flat_text(rb["content"])
+    changes = []
+    for k in sorted(set(fa) | set(fb)):
+        if fa.get(k) != fb.get(k) or (k in fa) != (k in fb):
+            changes.append({"path": k,
+                            "from": fa.get(k),
+                            "to": fb.get(k),
+                            "kind": "added" if k not in fa else ("removed" if k not in fb else "changed")})
+    diff = list(difflib.unified_diff((ra["content"] or "").splitlines(),
+                                    (rb["content"] or "").splitlines(),
+                                    fromfile="#%d" % a, tofile="#%d" % b, lineterm="", n=2))
+    return {"from": a, "to": b, "from_sha": ra["sha"], "to_sha": rb["sha"],
+            "changed_lines": len(changes), "changes": changes[:200],
+            "raw": diff[:200]}
+
+
+def reload_spec(text=None):
+    """热加载 spec.json。原地更新 dict，让 engine.SPEC 等既有引用同步生效。"""
+    new = json.loads(text if text is not None else _spec_text())
+    for u in list(new.get("users") or {}):
+        v = os.environ.get("FEINAO_PASS_" + u.upper())
+        if v:
+            new["users"][u] = v
+    SPEC.clear()
+    SPEC.update(new)
+    _tok_cache.clear()  # 上游地址/口令可能变了，旧 token 不能再用
+    return SPEC
+
+
+def harness_activate(rid, by="admin"):
+    """把某条修订写回 spec.json 并热加载。临时文件 + 原子替换，失败不留半截配置。"""
+    rid = int(rid)
+    conn = db()
+    row = conn.execute("SELECT * FROM harness_rev WHERE id=?", (rid,)).fetchone()
+    conn.close()
+    if not row:
+        return {"ok": False, "error": "修订 #%d 不存在" % rid}
+    text = row["content"] or ""
+    try:
+        json.loads(text)  # 脏数据不许上线：语法不对直接拒
+    except Exception as e:
+        return {"ok": False, "error": "修订内容不是合法 JSON：%s" % str(e)[:80]}
+    tmp = SPEC_PATH + ".tmp"
+    with io.open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    os.replace(tmp, SPEC_PATH)
+    reload_spec(text)
+    conn = db()
+    conn.execute("UPDATE harness_rev SET active=0")
+    conn.execute("UPDATE harness_rev SET active=1 WHERE id=?", (rid,))
+    conn.commit()
+    conn.close()
+    audit_log(by, "harness_activate", {"id": rid, "sha": row["sha"]}, "ok", True)
+    return {"ok": True, "active": rid, "sha": row["sha"],
+            "note": "已激活修订 #%d（sha %s），内存配置已热加载" % (rid, row["sha"])}
 
 
 # ---------------- LLM 网关（多供应商 + combo 降级链） ----------------

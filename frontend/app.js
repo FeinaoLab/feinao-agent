@@ -203,8 +203,85 @@ function approvalsView() {
   load();
 }
 
-var MEM = 'pending';
+function harnessView() {
+  $('#view').innerHTML = '<div class="apv">' +
+    '<div class="apv-title">飞构 · 配置修订</div>' +
+    '<div class="apv-bar"><b id="hs-n">加载中…</b><span id="hs-meta"></span></div>' +
+    '<div class="hs-actions"><button id="hs-snap">给当前配置留档</button>' +
+    '<span class="hs-hint">每次起服自动留一版；回滚只改 spec.json 并热加载，不重启服务</span></div>' +
+    '<div id="hs-list" class="apv-list">…</div>' +
+    '<pre id="hs-diff" class="hs-diff" hidden></pre></div>';
 
+  $('#hs-snap').onclick = function () {
+    var note = prompt('这一版备注（写清改了什么，日后靠它认版本）：') || '';
+    api('harness/snapshot', { method: 'POST', body: { note: note } }).then(function (d) {
+      alert(d.note || '已留档');
+      load();
+    }).catch(function (m) { alert('留档失败：' + m); });
+  };
+
+  function load() {
+    api('harness').then(function (d) {
+      var rows = d.rows || [];
+      $('#hs-n').textContent = '共 ' + rows.length + ' 版';
+      $('#hs-meta').textContent = '当前生效 #' + (d.active || '-') + ' ｜ 磁盘指纹 ' + d.sha +
+        ' ｜ ' + (d.path || 'spec.json') + ' ｜ 我的角色：' + (d.my_role || ROLE);
+      if (ROLE !== 'admin') { $('#hs-snap').hidden = true; }
+      if (!rows.length) {
+        $('#hs-list').innerHTML = '<div class="apv-empty">还没有修订记录。</div>';
+        return;
+      }
+      $('#hs-list').innerHTML = rows.map(function (r, i) {
+        var prev = rows[i + 1];
+        var act = '<div class="apv-act">' +
+          (prev ? '<button class="diff" data-a="' + prev.id + '" data-b="' + r.id + '">对比 #' + prev.id + ' →</button>' : '') +
+          (r.active ? '' : '<button class="go" data-id="' + r.id + '">回滚到此版</button>') + '</div>';
+        return '<div class="apv-card' + (r.active ? ' hs-active' : '') + '">' +
+          '<div class="apv-h"><b>#' + r.id + ' ' + esc(r.note || '（无备注）') + '</b>' +
+          (r.active ? '<span class="tag ok">正在生效</span>' : '<span class="tag">历史版本</span>') + '</div>' +
+          '<div class="apv-kv">' + esc(r.created) + ' ｜ by ' + esc(r.by || '-') +
+          ' ｜ sha ' + esc(r.sha) + ' ｜ ' + r.bytes + ' 字节</div>' + act +
+          '<div class="apv-out" id="hs-o' + r.id + '"></div></div>';
+      }).join('');
+    }).catch(function (m) { $('#hs-list').textContent = '加载失败：' + m; });
+  }
+
+  $('#hs-list').onclick = function (e) {
+    var b = e.target.closest('button'); if (!b) return;
+    if (b.classList.contains('diff')) {
+      api('harness/diff?from=' + b.dataset.a + '&to=' + b.dataset.b).then(function (d) {
+        var box = $('#hs-diff');
+        box.hidden = false;
+        var head = '# ' + d.from + ' → #' + d.to + '：' + d.changed_lines + ' 处配置变化\n';
+        var body = (d.changes || []).map(function (c) {
+          var from = c.kind === 'added' ? '（无）' : JSON.stringify(c['from']);
+          var to = c.kind === 'removed' ? '（已删）' : JSON.stringify(c['to']);
+          return '  ' + c.path + '：' + from + ' → ' + to;
+        }).join('\n');
+        box.textContent = head + (body || '（语义无变化，仅文件格式不同）') +
+          '\n\n—— 原始行差异 ——\n' + (d.raw || []).join('\n');
+        box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }).catch(function (m) { alert('对比失败：' + m); });
+      return;
+    }
+    var id = b.dataset.id; if (!id) return;
+    if (!confirm('回滚到 #' + id + '？会覆盖 spec.json 并立即热加载，正在跑的任务不受影响。')) return;
+    b.disabled = true;
+    var out = $('#hs-o' + id);
+    if (out) out.textContent = '回滚中…';
+    api('harness/activate', { method: 'POST', body: { id: parseInt(id, 10) } }).then(function (d) {
+      if (out) out.textContent = d.note || '已回滚';
+      setTimeout(load, 700);
+    }).catch(function (m) {
+      if (out) out.textContent = '回滚失败：' + m;
+      b.disabled = false;
+    });
+  };
+
+  load();
+}
+
+var MEM = 'pending';
 function memoryView() {
   var tabs = [['pending', '待确认'], ['active', '已生效'], ['disabled', '已停用'], ['all', '全部']];
   $('#view').innerHTML = '<div class="apv">' +
@@ -318,6 +395,7 @@ function render() {
   else if (CUR === 'pilots') pilotsView();
   else if (CUR === 'approvals') approvalsView();
   else if (CUR === 'memory') memoryView();
+  else if (CUR === 'harness') harnessView();
   else auditView();
 }
 

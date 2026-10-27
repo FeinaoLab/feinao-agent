@@ -148,8 +148,11 @@ Harness² 的 improvement harness 存的是"哪种改法在这类任务上有效
 
 ### P0 — 不做，后面全是空谈
 
-**P0-1 harness 版本化与回滚**
-- 现状：`spec.json` 是单文件，改动无历史、无 diff、无回滚，线上改了只能靠备份碰运气
+**P0-1 harness 版本化与回滚** ✅ 已落地（2026-10-27，见 `docs/Harness版本化-上线说明.md`；
+实现比原计划多做了一层语义 diff——用别的缩进重写文件不算改动，diff 精确到键路径）
+- 现状：~~`spec.json` 是单文件，改动无历史、无 diff、无回滚，线上改了只能靠备份碰运气~~
+  已改为 `harness_rev` 表：启动自动快照（幂等）、admin 专属接口、原子写盘 + 热加载回滚、
+  脏 JSON 拒绝上线、回滚必留审计；测试 9 例，全套 47 passed
 - 为什么：任何自动/半自动改进，第一步都是"能回到上一版"
 - 最小做法：`harness_rev` 表（rev / sha256 / content / note / by / created / active），启动时按 hash 判重；`GET /api/harness`、`POST /api/harness/activate`
 - 风险：低。不动行为，只加记录

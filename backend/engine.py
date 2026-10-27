@@ -137,6 +137,7 @@ class Handler(BaseHTTPRequestHandler):
                     "待确认记忆": conn.execute("SELECT COUNT(*) c FROM memory WHERE status='pending'").fetchone()["c"],
                     "待审批": conn.execute(
                         "SELECT COUNT(*) c FROM approvals WHERE status='pending'").fetchone()["c"],
+                    "配置修订": conn.execute("SELECT COUNT(*) c FROM harness_rev").fetchone()["c"],
                 }
                 ok_calls = conn.execute("SELECT COUNT(*) c FROM usage WHERE ok=1").fetchone()["c"]
                 fail_calls = conn.execute("SELECT COUNT(*) c FROM usage WHERE ok=0").fetchone()["c"]
@@ -241,6 +242,39 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(422, {"error": "conv_id 必填"})
                 o = lcm.LCM(conv_id=cid, user=me["user"])
                 return self._json(200, {"stats": o.stats(), "nodes": o.nodes()})
+            if len(parts) == 2 and parts[1] == "harness":
+                # GET /api/harness —— 配置修订列表（只给 admin：内容里含出厂口令）
+                me = _auth(self, roles=("admin",))
+                if not me:
+                    return self._json(403 if me is False else 401, {"error": "请先登录或无权限"})
+                out = ai.harness_list()
+                out["my_role"] = me["role"]
+                out["path"] = os.path.basename(ai.SPEC_PATH)
+                return self._json(200, out)
+            if parts[1:3] == ["harness", "detail"]:
+                # GET /api/harness/detail?id=N —— 某一版的完整内容
+                me = _auth(self, roles=("admin",))
+                if not me:
+                    return self._json(403 if me is False else 401, {"error": "请先登录或无权限"})
+                rid = int((qs.get("id") or ["0"])[0])
+                if not rid:
+                    return self._json(422, {"error": "id 必填"})
+                row = ai.harness_get(rid)
+                if not row:
+                    return self._json(404, {"error": "修订不存在"})
+                return self._json(200, row)
+            if parts[1:3] == ["harness", "diff"]:
+                # GET /api/harness/diff?from=A&to=B —— 两版差异（不传则最近两版）
+                me = _auth(self, roles=("admin",))
+                if not me:
+                    return self._json(403 if me is False else 401, {"error": "请先登录或无权限"})
+                a = (qs.get("from") or [""])[0]
+                b = (qs.get("to") or [""])[0]
+                out = ai.harness_diff(int(a) if a.isdigit() else None,
+                                      int(b) if b.isdigit() else None)
+                if out.get("error"):
+                    return self._json(404, out)
+                return self._json(200, out)
             return self._json(404, {"error": "not found"})
         except Exception as e:
             return self._json(500, {"error": str(e)[:200]})
@@ -336,6 +370,27 @@ class Handler(BaseHTTPRequestHandler):
                                    use_llm=bool(body.get("use_llm", True)))
                 if r.get("error"):
                     return self._json(422, r)
+                return self._json(200, r)
+
+            if parts[1:3] == ["harness", "snapshot"]:
+                # POST /api/harness/snapshot {note?} —— 给当前磁盘配置记一版
+                if me["role"] != "admin":
+                    return self._json(403, {"error": "只有 admin 能给配置留档"})
+                created, row = ai.harness_snapshot(note=body.get("note", ""), by=user)
+                return self._json(200, {"created": created, "rev": row,
+                                        "note": "已记录修订 #%d" % row["id"] if created
+                                                else "内容与修订 #%d 一致，未重复记录" % row["id"]})
+
+            if parts[1:3] == ["harness", "activate"]:
+                # POST /api/harness/activate {id} —— 回滚到某一版并热加载
+                if me["role"] != "admin":
+                    return self._json(403, {"error": "只有 admin 能切换生效配置"})
+                rid = int(body.get("id") or 0)
+                if not rid:
+                    return self._json(422, {"error": "id 必填"})
+                r = ai.harness_activate(rid, by=user)
+                if not r.get("ok"):
+                    return self._json(404, r)
                 return self._json(200, r)
 
             if parts[1:3] == ["chat"]:
