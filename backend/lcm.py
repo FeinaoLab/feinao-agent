@@ -263,7 +263,7 @@ class LCM:
         self.turn(q)
         sys_prompt = ("你是飞脑长期会话助手。下面给你的是本会话的历史摘要、最近对话，"
                       "以及按问题回溯到的原文片段；请依据这些信息作答，"
-                      "没有的信息明确说不知道，不要编。 [PILOT:lcm]")
+                      "没有的信息明确说不知道，不要编。" + ai.VERIFY_TAIL + " [PILOT:lcm]")
         ctx = self.build_context(keep_recent=keep_recent, budget=budget, system=sys_prompt)
         detail = self.retrieve(q, 3, exclude_seq=self._seq) if use_detail else []
         if detail:
