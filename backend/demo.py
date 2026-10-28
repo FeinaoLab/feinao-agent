@@ -76,6 +76,20 @@ _TICKETS = [
     {"id": 5006, "subject": "历史消息查不到", "priority": "P2", "status": "已解决", "owner": "ops01"},
 ]
 
+# 与生产飞瞰 BI 的实体对齐（sources/metrics），基准任务在新旧两套环境都能跑
+_SOURCES = [
+    {"id": 1, "name": "订单主库", "type": "MySQL", "status": "在线", "owner": "admin"},
+    {"id": 2, "name": "行为日志", "type": "Kafka", "status": "在线", "owner": "ops01"},
+    {"id": 3, "name": "财务中台", "type": "API", "status": "在线", "owner": "admin"},
+]
+
+_METRICS = [
+    {"id": 1, "name": "日活跃用户数", "caliber": "DAU", "owner": "admin", "status": "生效"},
+    {"id": 2, "name": "支付成功率", "caliber": "成功笔数/总笔数", "owner": "admin", "status": "生效"},
+    {"id": 3, "name": "客单价", "caliber": "GMV/下单人数", "owner": "ops01", "status": "生效"},
+    {"id": 4, "name": "退货率", "caliber": "退货单/出货单", "owner": "ops01", "status": "生效"},
+]
+
 SYSTEMS = {
     "kms": {
         "label": "KMS documentation",
@@ -87,8 +101,11 @@ SYSTEMS = {
         "entities": [
             {"key": "order", "label": "订单", "desc": "customer/amount/status/region"},
             {"key": "customer", "label": "客户", "desc": "name/tier/industry/owner"},
+            {"key": "sources", "label": "数据源", "desc": "name/type/status/owner"},
+            {"key": "metrics", "label": "指标字典", "desc": "name/caliber/owner/status"},
         ],
-        "rows": {"order": _ORDERS, "customer": _CUSTOMERS},
+        "rows": {"order": _ORDERS, "customer": _CUSTOMERS,
+                 "sources": _SOURCES, "metrics": _METRICS},
     },
     "cc": {
         "label": "Support desk",

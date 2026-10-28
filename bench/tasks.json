@@ -65,19 +65,19 @@
     {
       "id": "nl2api-01",
       "kind": "nl2api",
-      "title": "订单查询（实体识别）",
-      "q": "查一下华东区的订单",
+      "title": "数据源查询（实体识别）",
+      "q": "查一下 BI 里都有哪些数据源",
       "system": "bi",
       "expect": {
-        "min_rows": 5,
+        "min_rows": 3,
         "no_error": true
       }
     },
     {
       "id": "nl2api-02",
       "kind": "nl2api",
-      "title": "客户查询（实体识别）",
-      "q": "客户里有哪几个 KA 客户",
+      "title": "指标查询（实体识别）",
+      "q": "看看生效的指标有哪些",
       "system": "bi",
       "expect": {
         "min_rows": 3,
@@ -103,7 +103,8 @@
       "tone": "专业友好",
       "expect": {
         "answer_any": [
-          "话术"
+          "【开场】",
+          "【承接】"
         ],
         "no_error": true
       }
@@ -116,7 +117,8 @@
       "tone": "耐心专业",
       "expect": {
         "answer_any": [
-          "话术"
+          "【开场】",
+          "【承接】"
         ],
         "no_error": true
       }
@@ -137,8 +139,8 @@
     {
       "id": "react-02",
       "kind": "react",
-      "title": "ReAct 查数：BI 订单",
-      "goal": "查一下 BI 里西部能源的订单情况",
+      "title": "ReAct 查数：BI 数据源",
+      "goal": "查一下 BI 里有哪些数据源",
       "expect": {
         "tool_any": [
           "query_system"

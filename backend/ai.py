@@ -1026,6 +1026,10 @@ def _mock_react_plan(goal):
         ent = "ticket"
     elif "文章" in g:
         ent = "article"
+    elif "数据源" in g:
+        ent = "sources"
+    elif "指标" in g:
+        ent = "metrics"
     if ent:
         system = "cc" if ent == "ticket" else ("kms" if ent == "article" else "bi")
         plan.append(("query_system", {"system": system, "entity": ent, "q": ""}))
@@ -1213,23 +1217,51 @@ def _upstream_base(name):
     return up["base"]
 
 
+def _upstream_login(base, up, tmo):
+    """拿上游 token。飞系各系统的登录路径不统一：新版走 auth/login，
+    老版/演示桩走 api/login——两个都试，用错误报文区分「路径不对」和「密码不对」：
+    路径不对（掉进鉴权中间件）报「未登录或令牌无效」，密码错报「账号或密码错误」。"""
+    body = json.dumps({"username": up["user"], "password": up["pass"]}).encode()
+    errs = []
+    for path in ("api/auth/login", "api/login"):
+        req = urllib.request.Request(base + path, data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=min(10, tmo)) as r:
+                d = json.loads(r.read().decode())
+            # 飞系真实系统把业务数据包在 {"code":..,"data":{..}} 里；演示桩是平的。两种都兼容。
+            if isinstance(d, dict) and isinstance(d.get("data"), (dict, list)):
+                d = d["data"]
+            return d["token"]
+        except urllib.error.HTTPError as e:
+            try:
+                msg = (json.loads(e.read().decode()) or {}).get("message", "")
+            except Exception:
+                msg = ""
+            errs.append("%s→%s" % (path, msg or ("HTTP %s" % e.code)))
+            if "密码" in msg:
+                break  # 路径对了但密码不对，换路径也没用，直接把话说明白
+        except Exception as e:
+            errs.append("%s→%s" % (path, str(e)[:80]))
+    raise RuntimeError("上游登录失败（%s）" % "; ".join(errs))
+
+
 def _upstream_get(name, path):
     up = SPEC["upstreams"][name]
     base = _upstream_base(name)
     tmo = tool_policy("query_system")["timeout_seconds"]  # 超时也在配置里，不在代码里
     tok = _tok_cache.get(name)
     if not tok:
-        body = json.dumps({"username": up["user"], "password": up["pass"]}).encode()
-        req = urllib.request.Request(base + "api/login", data=body, method="POST")
-        req.add_header("Content-Type", "application/json")
-        with urllib.request.urlopen(req, timeout=min(10, tmo)) as r:
-            tok = json.loads(r.read().decode())["token"]
+        tok = _upstream_login(base, up, tmo)
         _tok_cache[name] = tok
     req = urllib.request.Request(base + path)
     req.add_header("Authorization", "Bearer " + tok)
     try:
         with urllib.request.urlopen(req, timeout=tmo) as r:
-            return json.loads(r.read().decode())
+            d = json.loads(r.read().decode())
+        if isinstance(d, dict) and isinstance(d.get("data"), (dict, list)):
+            d = d["data"]  # 飞系真实系统的响应包装；演示桩没有这层
+        return d
     except urllib.error.HTTPError as e:
         if e.code == 401:
             _tok_cache.pop(name, None)
@@ -1420,7 +1452,8 @@ def pilot_script(scenario, tone="专业友好", user="admin"):
 TOOLS = {
     "search_docs": {"desc": "搜索飞系知识库文档", "args": {"q": "str"},
                     "fn": lambda a: rag_search(a.get("q", ""))},
-    "query_system": {"desc": "查询飞系系统数据（system: kms/bi/cc…, entity: 实体key）", "args": {"system": "str", "entity": "str", "q": "str"},
+    "query_system": {"desc": "查询飞系系统数据。system 取 kms/bi/cc；entity 用系统实体 key（如 bi 的 sources/metrics/dashboards/reports、kms 的 articles、cc 的 tickets）。"
+                     "示例：查 BI 数据源 → {\"tool\":\"query_system\",\"args\":{\"system\":\"bi\",\"entity\":\"sources\",\"q\":\"\"}}", "args": {"system": "str", "entity": "str", "q": "str"},
                      "fn": lambda a: upstream_rows(a["system"], a["entity"], a.get("q", ""), 10)},
     # 写操作：会真的落库，所以 requires_confirm=true，必须人工放行（审批工作台）
     "ingest_doc": {"desc": "把一段内容写入飞脑知识库（写操作，需人工审批）", "args": {"title": "str", "body": "str"},
