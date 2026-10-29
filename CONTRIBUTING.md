@@ -5,7 +5,7 @@
 ## 先跑起来
 
 ```bash
-git clone https://github.com/dukema81/feinao-agent.git
+git clone https://github.com/FeinaoLab/feinao-agent.git
 cd feinao-agent
 python backend/server.py        # 零依赖，不需要 pip install
 ```

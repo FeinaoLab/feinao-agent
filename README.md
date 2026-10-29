@@ -1,6 +1,6 @@
 # FeiNao — an audit-first agent gateway
 
-[![CI](https://github.com/dukema81/feinao-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/dukema81/feinao-agent/actions/workflows/ci.yml)
+[![CI](https://github.com/FeinaoLab/feinao-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/FeinaoLab/feinao-agent/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)](#5-zero-dependencies-is-a-design-constraint-not-a-shortcut)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -14,7 +14,7 @@ agent with citations, an evidence log, per-action permissions, a human approval 
 resumable task state, and cross-session memory.
 
 ```bash
-git clone https://github.com/dukema81/feinao-agent.git && cd feinao-agent
+git clone https://github.com/FeinaoLab/feinao-agent.git && cd feinao-agent
 python backend/server.py
 # open http://127.0.0.1:8060/  →  admin / admin123
 ```

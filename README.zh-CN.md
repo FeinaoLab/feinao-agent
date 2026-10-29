@@ -13,7 +13,7 @@
 ## 三条命令跑起来
 
 ```bash
-git clone https://github.com/dukema81/feinao-agent.git && cd feinao-agent
+git clone https://github.com/FeinaoLab/feinao-agent.git && cd feinao-agent
 python backend/server.py          # 零依赖，不需要 pip install
 # 浏览器开 http://127.0.0.1:8060/ ，三角色：admin/admin123 · ops01/ops123456 · view01/view123456
 ```
