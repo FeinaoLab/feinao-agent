@@ -87,6 +87,7 @@ LLM Key 清空成 mock（只在本进程），因为「测试时悄悄走了真�
 - **L2 ReAct Agent**：工具注册表（search_docs / query_system / ingest_doc）+ 步数上限
 - **LCM 无损上下文（长期会话）**：原文全量落库 + 分块摘要 + 摘要上卷成 DAG + 关键词回溯原文；上下文受 token 预算约束，历史再长也不膨胀
 - **验证型收尾要求（VERIFY_TAIL）**：所有面向用户的回答（rag / react / LCM / 兼容链路）系统提示强制要求「结论附依据、产出物给位置、未验证要标注」——完成必须是可验证产物，不是模型自述；有测试守卫（`tests/test_provider.py`）
+- **出站管控接线（v2.3）**：`egress` 段不再只是配置文件里的字——所有出站统一走唯一入口 `egress_open`（协议/端口/域名白名单、禁私网、禁云元数据端点、响应体上限、超时夹紧），被拒落审计；`spec` 里声明的上游与供应商 origin 视为可信（本机回环上游不被私网规则误杀），信任来源是配置不是硬编码；实体名拼进 URL 路径前做形状校验（防 `../../` 同源越权）；接口 `GET /api/ai/policy?egress_test=1` 可让策略自检（详见 `docs/出站管控接线-上线说明.md`）
 - **证据链（v1.3）**：每次回答落 `evidence` 表——真实命中的文档/回溯轮次、工具调用链、上下文规模、是否标注未验证；由代码记录"实际发生了什么"，与模型自述互相独立。接口 `GET /api/evidence?conv_id=N`
 - **动作级权限/预算（v1.3）**：`spec.json` 的 `tool_policies` 按动作声明 `roles` / `max_calls_per_run` / `requires_confirm`，ReAct 强制执行；拒绝不静默，原因喂回模型并落 `denied` 步骤
 - **任务进度落库（v1.3）**：`tasks` + `task_steps`（tool_call / tool_result / denied / pending / error / answer / replay），步数耗尽保持 `active` 可 `task_id` 断点续跑；接口 `GET /api/tasks`、`GET /api/tasks/detail?id=N`

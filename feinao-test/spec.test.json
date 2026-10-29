@@ -106,7 +106,7 @@
     "malformed_json_limit": 2
   },
   "egress": {
-    "enabled": false,
+    "enabled": true,
     "allow_schemes": [
       "http",
       "https"

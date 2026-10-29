@@ -191,7 +191,9 @@ def test_policy_endpoint():
         pol = json.loads(raw)
         assert set(pol["modes"]["definitions"]) == {"plan", "default", "auto", "yolo"}
         assert pol["limits"]["max_wall_clock_seconds"] == 600
-        assert pol["egress"]["enabled"] is False
+        # 接口要如实反映配置文件里的取值（而不是某个写死的常量）
+        assert pol["egress"]["enabled"] is _spec_dict()["egress"]["enabled"]
+        assert pol["egress"]["max_response_bytes"] == _spec_dict()["egress"]["max_response_bytes"]
         assert pol["tools"]["ingest_doc"]["class"] == "write"
         assert pol["tools"]["query_system"]["requires_confirm"] is False
         for secret in ("admin123", "ops123456", "view123456"):

@@ -389,10 +389,83 @@ function auditView() {
   }).catch(function (m) { $('#tbl').textContent = m; });
 }
 
+function agentView() {
+  // 飞执页：ReAct 任务台。会话四模式：default（写/危险走审批）/ plan（写挂起、危险拒绝）/ auto / yolo（仅管理员）
+  var modes = [['default', '默认（写需确认）'], ['plan', '计划（写挂起·危险拒绝）'],
+               ['auto', '自动（同默认）']];
+  if (ROLE === 'admin') modes.push(['yolo', 'Yolo（全放行，仅管理员）']);
+  var savedMode = localStorage.getItem('feinao_mode') || 'default';
+  if (savedMode === 'yolo' && ROLE !== 'admin') savedMode = 'default';
+  $('#view').innerHTML = '<div class="chat">' +
+    '<div class="cbar"><select id="amode">' + modes.map(function (m) {
+      return '<option value="' + m[0] + '"' + (m[0] === savedMode ? ' selected' : '') + '>' + m[1] + '</option>';
+    }).join('') + '</select>' +
+    '<span class="cstat">写/危险动作按当前模式决定直接执行、挂审批还是拒绝</span></div>' +
+    '<div class="inp"><textarea id="atx" placeholder="描述一个任务，Enter 发起（Agent 会自主选工具执行）"></textarea>' +
+    '<button id="arun">发起</button></div>' +
+    '<div id="atrace"></div>' +
+    '<h3 style="margin:14px 0 8px">任务列表</h3><div id="atasks">加载中…</div></div>';
+  $('#amode').onchange = function () { localStorage.setItem('feinao_mode', this.value); };
+  $('#arun').onclick = runTask;
+  $('#atx').onkeydown = function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runTask(); } };
+  loadTasks();
+
+  function mode() { return $('#amode').value; }
+  function runTask() {
+    var t = $('#atx').value.trim(); if (!t) return;
+    $('#atx').value = '';
+    $('#atrace').innerHTML = '<p class="cstat">执行中…（模式：' + mode() + '）</p>';
+    api('ai/react', { method: 'POST', body: { task: t, mode: mode() } })
+      .then(function (d) { renderTrace(d); loadTasks(); })
+      .catch(function (m) { $('#atrace').innerHTML = '<p style="color:#c0392b">' + esc(m) + '</p>'; });
+  }
+  function renderTrace(d) {
+    if (d.error) { $('#atrace').innerHTML = '<p style="color:#c0392b">' + esc(d.error) + '</p>'; return; }
+    var html = '<div class="msg ai"><b>任务 #' + d.task_id + '</b>' +
+      (d.status ? '（状态 ' + esc(d.status) + '）' : '') + '<br><br>' +
+      esc(d.answer || '（任务挂起：等待审批后在「飞审」页放行，任务会自动续跑）') + '</div>';
+    (d.steps || []).forEach(function (s, i) {
+      var line;
+      if (s.denied) line = '⛔ ' + s.denied;
+      else if (s.status === '需要人工确认，已挂起等待审批') line = '⏸ 需人工确认（审批单 #' + s.approval_id + '）：' + s.tool;
+      else if (s.replay) line = '↻ 复用已放行结果：' + s.tool;
+      else if (s.tool) line = '🔧 ' + s.tool + ' → ' + String(s.obs || '').slice(0, 120);
+      else if (s.kind) line = '· ' + s.kind + ': ' + String(s.content || '').slice(0, 120);
+      else line = JSON.stringify(s).slice(0, 120);
+      html += '<p class="cstat">' + (i + 1) + '. ' + esc(line) + '</p>';
+    });
+    $('#atrace').innerHTML = html;
+  }
+  function loadTasks() {
+    api('tasks').then(function (d) {
+      var rows = d.rows || [];
+      $('#atasks').innerHTML = '<table><tr><th>#</th><th>任务</th><th>状态</th><th>更新</th><th></th></tr>' +
+        rows.map(function (r) {
+          return '<tr><td>' + r.id + '</td><td>' + esc((r.goal || '').slice(0, 40)) + '</td><td>' +
+            '<span class="tag ' + (r.status === 'done' ? 'ok' : r.status === 'active' ? 'info' : 'warn') + '">' +
+            esc(r.status) + '</span></td><td>' + esc(r.updated || '') + '</td>' +
+            '<td><a href="#" data-tid="' + r.id + '" class="adetail">详情</a></td></tr>';
+        }).join('') + '</table>';
+      document.querySelectorAll('.adetail').forEach(function (a) {
+        a.onclick = function (e) {
+          e.preventDefault();
+          api('tasks/detail?id=' + a.dataset.tid).then(function (t) {
+            renderTrace({ task_id: t.id, status: t.status, answer: t.goal,
+              steps: (t.steps || []).map(function (s) {
+                try { return JSON.parse(s.content); } catch (x) { return { kind: s.kind, content: s.content }; }
+              }) });
+          }).catch(function (m) { alert(m); });
+        };
+      });
+    }).catch(function (m) { $('#atasks').textContent = m; });
+  }
+}
+
 function render() {
   document.querySelectorAll('#nav a').forEach(function (a) { a.classList.toggle('on', a.dataset.k === CUR); });
   if (CUR === 'chat') chatView();
   else if (CUR === 'pilots') pilotsView();
+  else if (CUR === 'agent') agentView();
   else if (CUR === 'approvals') approvalsView();
   else if (CUR === 'memory') memoryView();
   else if (CUR === 'harness') harnessView();

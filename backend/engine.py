@@ -124,10 +124,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, ai.providers_health(ping=ping))
             if parts[1:3] == ["ai", "policy"]:
                 # GET /api/ai/policy —— 当前生效策略（脱敏），排障时看清楚"到底按哪套规则在跑"
+                # ?egress_test=1 顺带跑一遍出站判定自检：策略到底拦谁、放谁，看结论不用看代码
                 me = _auth(self)
                 if not me:
                     return self._json(401, {"error": "请先登录"})
-                return self._json(200, ai.policy_effective())
+                body = ai.policy_effective()
+                if qs.get("egress_test", ["0"])[0] in ("1", "true", "yes"):
+                    body["egress_selftest"] = ai.egress_selftest()
+                return self._json(200, body)
             if parts[1:3] == ["skills"]:
                 # GET /api/skills —— 技能注册表（登录即可读；改动走 POST，admin 专属）
                 me = _auth(self)
@@ -444,6 +448,13 @@ class Handler(BaseHTTPRequestHandler):
                 if not r.get("ok"):
                     return self._json(422, r)
                 return self._json(200, r)
+
+            if parts[1:3] == ["skills", "import"]:
+                # POST /api/skills/import —— 把 skills/ 目录的 SKILL.md 导入注册表（admin）
+                # 只补缺不覆盖；工具未注册或为空的文件会被跳过并说明原因
+                if me["role"] != "admin":
+                    return self._json(403, {"error": "只有 admin 能导入技能目录"})
+                return self._json(200, ai.skills_import_from_dir(by=user))
 
             if parts[1:3] == ["memory", "decisions"]:
                 # POST /api/memory/decisions {slot?} —— 编辑者的经验清单（P1-1）

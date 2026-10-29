@@ -106,12 +106,16 @@
     "malformed_json_limit": 2
   },
   "egress": {
-    "enabled": false,
+    "enabled": true,
     "allow_schemes": [
       "http",
       "https"
     ],
-    "allow_domains": [],
+    "allow_domains": [
+      "dashscope.aliyuncs.com",
+      "api.deepseek.com",
+      "api.hunyuan.cloud.tencent.com"
+    ],
     "allow_ports": [
       80,
       443

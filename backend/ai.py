@@ -4,11 +4,14 @@
 import difflib
 import hashlib
 import io
+import ipaddress
 import json
 import os
 import re
+import socket
 import sqlite3
 import time
+import urllib.parse
 import urllib.request
 import urllib.error
 
@@ -224,6 +227,7 @@ def init_db():
     conn.close()
     _ensure_fts()
     skill_seed()
+    skills_import_from_dir(by="system")   # SKILL.md 目录幂等导入（只补缺不覆盖）
     harness_snapshot(note="启动快照")  # 每次起服记一版，内容没变则幂等跳过
 
 
@@ -370,6 +374,189 @@ def egress_policy():
             "request_timeout_seconds": int(e.get("request_timeout_seconds", 15))}
 
 
+# ---------------- 出站管控（egress）：策略 + 唯一出口 ----------------
+#
+# 设计原则：策略在配置里，判断在代码里，出口只有一个。
+# 任何绕过 egress_open 直接 urllib.request.urlopen 的调用都算 bug——
+# 策略登记了却不接线，等于没策略。
+
+# 云元数据服务：SSRF 的经典跳板。无论白名单怎么写都必须拒。
+METADATA_HOSTS = {"169.254.169.254", "100.100.100.200", "100.100.100.100",
+                  "metadata.google.internal", "metadata.tencentyun.com",
+                  "fd00:ec2::254", "instance-data"}
+
+
+class EgressDenied(RuntimeError):
+    """出站请求被策略拒绝。带原因，便于审计与排障。"""
+
+
+def _origin(url):
+    p = urllib.parse.urlsplit(url)
+    port = p.port or (443 if (p.scheme or "").lower() == "https" else 80)
+    return ((p.scheme or "").lower(), (p.hostname or "").lower(), int(port))
+
+
+def _trusted_origins():
+    """spec 里显式声明的上游与供应商 origin 视为可信。
+
+    可信来自「配置写下的地址」，不来自代码默认值：本机回环的上游因此不会被私网策略误杀，
+    而任意一个没写进 spec 的内网地址仍然进不来。"""
+    out = set()
+    for name, up in (SPEC.get("upstreams") or {}).items():
+        for k in ("base", "demo_base"):
+            if up.get(k):
+                try:
+                    out.add(_origin(up[k]))
+                except Exception:
+                    pass
+        over = os.environ.get("FEINAO_UPSTREAM_" + name.upper())
+        if over:
+            try:
+                out.add(_origin(over))
+            except Exception:
+                pass
+    for p in SPEC.get("providers") or []:
+        if p.get("base"):
+            try:
+                out.add(_origin(p["base"]))
+            except Exception:
+                pass
+    return out
+
+
+def _host_allowed(host, allow_domains):
+    """域名白名单：支持 example.com 与 *.example.com 两种写法（都按后缀匹配）。"""
+    for d in allow_domains:
+        d = str(d).strip().lower()
+        if d.startswith("*."):
+            d = d[2:]
+        d = d.lstrip(".")
+        if not d:
+            continue
+        if host == d or host.endswith("." + d):
+            return True
+    return False
+
+
+def _ip_blocked(ip):
+    a = ipaddress.ip_address(ip)
+    return bool(a.is_private or a.is_loopback or a.is_link_local or a.is_reserved
+                or a.is_multicast or a.is_unspecified)
+
+
+def check_egress(url, purpose="", user=None, resolve=True):
+    """出站闸门：返回 (ok, reason)。
+
+    `enabled=false` 时一律放行，行为与改造前完全一致（老部署升级不炸）。
+    判定顺序：协议 → 元数据端点 → 可信 origin → 端口 → 域名白名单 → 私网解析。"""
+    pol = egress_policy()
+    if not pol["enabled"]:
+        return True, ""
+    try:
+        p = urllib.parse.urlsplit(url)
+    except Exception:
+        return False, "URL 无法解析：%s" % str(url)[:120]
+    scheme = (p.scheme or "").lower()
+    if scheme not in [s.lower() for s in pol["allow_schemes"]]:
+        return False, "协议 %s 不在允许列表 %s" % (scheme or "(空)", pol["allow_schemes"])
+    host = (p.hostname or "").lower()
+    if not host:
+        return False, "URL 缺少主机名"
+    if pol["deny_metadata_endpoints"] and host in METADATA_HOSTS:
+        return False, "目标是云元数据端点 %s（SSRF 红线）" % host
+    try:
+        port = int(p.port or (443 if scheme == "https" else 80))
+    except ValueError:
+        return False, "端口非法"
+    if pol["trust_upstream_origins"] and (scheme, host, port) in _trusted_origins():
+        return True, "spec 声明的上游/供应商"
+    if port not in pol["allow_ports"]:
+        return False, "端口 %d 不在允许列表 %s" % (port, pol["allow_ports"])
+    if pol["allow_domains"] and not _host_allowed(host, pol["allow_domains"]):
+        return False, "域名 %s 不在白名单" % host
+    if pol["deny_private_networks"]:
+        literal = None
+        try:
+            ipaddress.ip_address(host)
+            literal = host
+        except ValueError:
+            literal = None
+        if literal:
+            if _ip_blocked(literal):
+                return False, "目标是内网/保留地址 %s" % literal
+        elif resolve:
+            try:
+                infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+            except Exception as e:
+                return False, "域名解析失败（%s）：%s" % (host, str(e)[:80])
+            for info in infos:
+                ip = info[4][0]
+                if _ip_blocked(ip):
+                    return False, "解析到内网/保留地址 %s（%s）" % (ip, host)
+    return True, ""
+
+
+def _safe_url(url):
+    """日志里不留 query（可能带令牌）与账号密码；端口只在非默认时保留。"""
+    try:
+        p = urllib.parse.urlsplit(url)
+        netloc = p.hostname or ""
+        try:
+            port = p.port
+        except ValueError:
+            port = None
+        if port and not ((p.scheme == "http" and port == 80)
+                         or (p.scheme == "https" and port == 443)):
+            netloc += ":%d" % port
+        path = p.path if len(p.path) <= 120 else p.path[:117] + "..."
+        return "%s://%s%s" % (p.scheme, netloc, path)
+    except Exception:
+        return str(url)[:120]
+
+
+def egress_open(req, timeout=None, purpose="", user=None):
+    """所有出站 HTTP 的唯一入口：先过策略、再限时。返回响应对象（记得用 read_capped 读）。"""
+    pol = egress_policy()
+    ok, why = check_egress(req.full_url, purpose, user)
+    if not ok:
+        audit_log(user or "system", "egress_denied",
+                  {"url": _safe_url(req.full_url), "purpose": purpose}, why, False)
+        raise EgressDenied("出站被拒：%s（%s）" % (why, _safe_url(req.full_url)))
+    tmo = float(timeout or pol["request_timeout_seconds"])
+    if pol["enabled"]:
+        tmo = min(tmo, float(pol["request_timeout_seconds"]))
+    return urllib.request.urlopen(req, timeout=tmo)
+
+
+def read_capped(r, limit=None):
+    """读取响应体并限长：多读一个字节即判定超限，绝不把超大响应读进内存。"""
+    pol = egress_policy()
+    if not pol["enabled"]:
+        return r.read()
+    cap = int(limit or pol["max_response_bytes"])
+    data = r.read(cap + 1)
+    if len(data) > cap:
+        raise EgressDenied("响应体超过上限 %d 字节" % cap)
+    return data
+
+
+def egress_selftest():
+    """排障用：用策略自身跑几条代表性判定，返回结论而不是让人猜。"""
+    pol = egress_policy()
+    cases = [
+        ("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", True),
+        ("http://169.254.169.254/latest/meta-data/", False),
+        ("http://127.0.0.1:8050/kms/api/spec", None),   # 取决于是否写进 spec / 是否禁私网
+        ("file:///etc/passwd", False),
+    ]
+    out = []
+    for url, _ in cases:
+        ok, why = check_egress(url, "selftest", None, resolve=False)
+        out.append({"url": _safe_url(url), "ok": ok, "reason": why or "放行"})
+    return {"enabled": pol["enabled"], "allow_domains": pol["allow_domains"],
+            "allow_ports": pol["allow_ports"], "cases": out}
+
+
 def policy_effective():
     """对外可见的生效策略（排障用）。不含口令、Key、上游账号——只回结构与取值。"""
     tools = {}
@@ -492,6 +679,85 @@ def skill_match(q, top=2):
             scored.append((hit, s))
     scored.sort(key=lambda x: -x[0])
     return [s for _, s in scored[:top]]
+
+
+# ---------------- SKILL.md 目录（任务 4：技能目录化） ----------------
+#
+# 技能除了走 API 存库，还支持仓库里的 skills/<名>/SKILL.md 文件：
+#   ---
+#   name: 查销售数据
+#   use_when: 需要查 BI 销售相关数据
+#   tools: [query_system]
+#   enabled: true
+#   ---
+#   正文 = 怎么用（how）
+# 启动时幂等导入（只补缺不覆盖人工改动，与 skill_seed 同语义）；也可手动触发重导。
+
+SKILLS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills")
+
+
+def skills_scan_dir(base=None):
+    """扫描 skills/ 目录下的 SKILL.md，解析 frontmatter。返回 [{name,use_when,how,tools,enabled,path}]。"""
+    base = base or SKILLS_DIR
+    out = []
+    if not os.path.isdir(base):
+        return out
+    for root, dirs, files in os.walk(base):
+        if "SKILL.md" not in files:
+            continue
+        path = os.path.join(root, "SKILL.md")
+        try:
+            raw = io.open(path, encoding="utf-8").read()
+        except Exception:
+            continue
+        meta, how = {}, raw
+        if raw.startswith("---"):
+            parts = raw.split("---", 2)
+            if len(parts) >= 3:
+                for line in parts[1].splitlines():
+                    if ":" not in line:
+                        continue
+                    k, v = line.split(":", 1)
+                    meta[k.strip().lower()] = v.strip()
+                how = parts[2].strip()
+        name = (meta.get("name") or os.path.basename(root)).strip()
+        if not name:
+            continue
+        tools = meta.get("tools", "")
+        tools = [t.strip() for t in tools.strip("[]").split(",") if t.strip()] if tools else []
+        out.append({
+            "name": name,
+            "use_when": meta.get("use_when", ""),
+            "how": how[:600],
+            "tools": tools,
+            "enabled": 0 if str(meta.get("enabled", "true")).lower() in ("false", "0", "no") else 1,
+            "path": os.path.relpath(path, base).replace("\\\\", "/"),
+        })
+    return out
+
+
+def skills_import_from_dir(by="admin", base=None):
+    """把 SKILL.md 目录导入注册表。只补缺（INSERT OR IGNORE），不覆盖库里已有的同名技能。
+    返回 {imported: [...], skipped_invalid: [...]}——工具名不在注册表的会拒绝并说明原因。"""
+    res = {"imported": [], "skipped_invalid": []}
+    for s in skills_scan_dir(base):
+        bad = [t for t in s["tools"] if t not in TOOLS]
+        if not s["tools"] or bad:
+            res["skipped_invalid"].append(
+                {"name": s["name"], "reason": "工具未注册: %s" % bad if bad else "tools 为空"})
+            continue
+        conn = db()
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO skills(name,use_when,how,tools,enabled,created) "
+            "VALUES(?,?,?,?,?,?)",
+            (s["name"], s["use_when"][:300], s["how"], json.dumps(s["tools"]),
+             s["enabled"], _now()))
+        conn.commit()
+        conn.close()
+        if cur.rowcount:
+            res["imported"].append(s["name"])
+            audit_log(by, "skill_import", {"name": s["name"], "path": s["path"]}, "ok", True)
+    return res
 
 
 # ---------------- 审批工作台（Permission 层的真闸门） ----------------
@@ -988,7 +1254,7 @@ def harness_patch(patch, note="", by="editor"):
 
 # ---------------- LLM 网关（多供应商 + combo 降级链） ----------------
 
-def _call_openai(p, messages, timeout=30):
+def _call_openai(p, messages, timeout=30, user="system"):
     key = os.environ.get(p.get("key_env", ""), "")
     if not key:
         raise RuntimeError("no key for " + p["name"])
@@ -997,8 +1263,8 @@ def _call_openai(p, messages, timeout=30):
     req.add_header("Content-Type", "application/json")
     req.add_header("Authorization", "Bearer " + key)
     t0 = time.time()
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        data = json.loads(r.read().decode())
+    with egress_open(req, timeout=timeout, purpose="llm:%s" % p["name"], user=user) as r:
+        data = json.loads(read_capped(r).decode())
     lat = int((time.time() - t0) * 1000)
     text = data["choices"][0]["message"]["content"]
     u = data.get("usage", {})
@@ -1128,7 +1394,7 @@ def llm_chat(messages, user="system"):
                 out = _call_mock(messages)
                 _usage("mock", "mock-1", True, int((time.time() - t0) * 1000), 0, 0)
                 return out, p["name"]
-            out = _call_openai(p, messages)
+            out = _call_openai(p, messages, user=user)
             return out, p["name"]
         except Exception as e:
             last_err = str(e)[:200]
@@ -1217,7 +1483,7 @@ def _upstream_base(name):
     return up["base"]
 
 
-def _upstream_login(base, up, tmo):
+def _upstream_login(base, up, tmo, user=None):
     """拿上游 token。飞系各系统的登录路径不统一：新版走 auth/login，
     老版/演示桩走 api/login——两个都试，用错误报文区分「路径不对」和「密码不对」：
     路径不对（掉进鉴权中间件）报「未登录或令牌无效」，密码错报「账号或密码错误」。"""
@@ -1227,12 +1493,15 @@ def _upstream_login(base, up, tmo):
         req = urllib.request.Request(base + path, data=body, method="POST")
         req.add_header("Content-Type", "application/json")
         try:
-            with urllib.request.urlopen(req, timeout=min(10, tmo)) as r:
-                d = json.loads(r.read().decode())
+            with egress_open(req, timeout=min(10, tmo),
+                             purpose="upstream-login", user=user) as r:
+                d = json.loads(read_capped(r).decode())
             # 飞系真实系统把业务数据包在 {"code":..,"data":{..}} 里；演示桩是平的。两种都兼容。
             if isinstance(d, dict) and isinstance(d.get("data"), (dict, list)):
                 d = d["data"]
             return d["token"]
+        except EgressDenied:
+            raise  # 出站被策略拒绝不是「登录失败」，别伪装成密码问题把人带偏
         except urllib.error.HTTPError as e:
             try:
                 msg = (json.loads(e.read().decode()) or {}).get("message", "")
@@ -1246,19 +1515,20 @@ def _upstream_login(base, up, tmo):
     raise RuntimeError("上游登录失败（%s）" % "; ".join(errs))
 
 
-def _upstream_get(name, path):
+def _upstream_get(name, path, user=None):
     up = SPEC["upstreams"][name]
     base = _upstream_base(name)
     tmo = tool_policy("query_system")["timeout_seconds"]  # 超时也在配置里，不在代码里
     tok = _tok_cache.get(name)
     if not tok:
-        tok = _upstream_login(base, up, tmo)
+        tok = _upstream_login(base, up, tmo, user)
         _tok_cache[name] = tok
     req = urllib.request.Request(base + path)
     req.add_header("Authorization", "Bearer " + tok)
     try:
-        with urllib.request.urlopen(req, timeout=tmo) as r:
-            d = json.loads(r.read().decode())
+        with egress_open(req, timeout=tmo, purpose="upstream:%s" % name,
+                         user=user) as r:
+            d = json.loads(read_capped(r).decode())
         if isinstance(d, dict) and isinstance(d.get("data"), (dict, list)):
             d = d["data"]  # 飞系真实系统的响应包装；演示桩没有这层
         return d
@@ -1268,15 +1538,27 @@ def _upstream_get(name, path):
         raise
 
 
-def upstream_spec(name):
-    return _upstream_get(name, "api/spec")
+def upstream_spec(name, user=None):
+    return _upstream_get(name, "api/spec", user)
 
 
-def upstream_rows(name, entity, q="", limit=20):
-    path = "api/%s?limit=%d" % (entity, int(limit))
+# 实体名来自模型生成的参数，拼进 URL 路径前必须验形：`../../admin/delete` 这类值
+# 不该靠上游去挡。同源不同路径同样是越权，egress 只管域名管不到这里。
+_ENTITY_RE = re.compile(r"^[A-Za-z0-9_\-]{1,40}$")
+
+
+def upstream_rows(name, entity, q="", limit=20, user=None):
+    ent = str(entity or "").strip()
+    if not _ENTITY_RE.match(ent):
+        raise ValueError("非法实体名 %r：只允许字母/数字/下划线/短横，最长 40" % ent[:40])
+    try:
+        n = max(1, min(int(limit), 200))
+    except (TypeError, ValueError):
+        n = 20
+    path = "api/%s?limit=%d" % (ent, n)
     if q:
-        path += "&q=" + urllib.request.quote(q)
-    d = _upstream_get(name, path)
+        path += "&q=" + urllib.request.quote(str(q)[:200])
+    d = _upstream_get(name, path, user)
     return d.get("rows") or d.get("items") or (d if isinstance(d, list) else [])
 
 
@@ -1385,7 +1667,7 @@ def _match_entity(spec, q):
 
 def pilot_nl2api(q, system="bi", user="admin"):
     try:
-        spec = upstream_spec(system)
+        spec = upstream_spec(system, user)
     except Exception as e:
         result = {"error": "上游系统不可达：%s" % str(e)[:120]}
         audit_log(user, "pilot_nl2api", {"q": q, "system": system}, result, False)
@@ -1413,7 +1695,7 @@ def pilot_nl2api(q, system="bi", user="admin"):
         audit_log(user, "pilot_nl2api", {"q": q, "system": system}, result, False)
         return result
     try:
-        rows = upstream_rows(system, ent_key, intent.get("q", ""), intent.get("limit", 20))
+        rows = upstream_rows(system, ent_key, intent.get("q", ""), intent.get("limit", 20), user)
     except Exception as e:
         result = {"error": "查询失败：%s" % str(e)[:120]}
         audit_log(user, "pilot_nl2api", {"q": q, "system": system}, result, False)
